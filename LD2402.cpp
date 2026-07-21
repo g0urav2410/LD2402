@@ -49,11 +49,19 @@ void LD2402::feedByte(uint8_t b) {
             _body[_bodyIdx++] = b;
             if (_bodyIdx >= _bodyLen) _pstate = P_FOOT1;
             return;
-        case P_FOOT1: _pstate = P_FOOT2; return;
-        case P_FOOT2: _pstate = P_FOOT3; return;
-        case P_FOOT3:
+        // Footer bytes are checked against ENG_FOOT, not just counted -- with
+        // nothing wired in, a floating RX pin picks up real electrical noise
+        // (especially this close to a WiFi radio), and an unvalidated footer
+        // let noise that happened to produce a plausible header+length get
+        // accepted as a genuine frame, occasionally reporting fake presence.
+        // Four states for four footer bytes (F8 F7 F6 F5) -- P_FOOT1 receives
+        // the first one, P_FOOT4 the last.
+        case P_FOOT1: _pstate = (b == ENG_FOOT[0]) ? P_FOOT2 : P_IDLE; return;
+        case P_FOOT2: _pstate = (b == ENG_FOOT[1]) ? P_FOOT3 : P_IDLE; return;
+        case P_FOOT3: _pstate = (b == ENG_FOOT[2]) ? P_FOOT4 : P_IDLE; return;
+        case P_FOOT4:
             _pstate = P_IDLE;
-            handleEngineeringFrame(_body, _bodyLen);
+            if (b == ENG_FOOT[3]) handleEngineeringFrame(_body, _bodyLen);
             return;
     }
 }

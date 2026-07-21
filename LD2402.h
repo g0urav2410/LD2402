@@ -95,7 +95,7 @@ private:
     Stream *_serial = nullptr;
 
     // --- streaming parse state (text or engineering-binary, module picks one) ---
-    enum ParseState { P_IDLE, P_HDR2, P_HDR3, P_HDR4, P_LEN1, P_LEN2, P_BODY, P_FOOT1, P_FOOT2, P_FOOT3 };
+    enum ParseState { P_IDLE, P_HDR2, P_HDR3, P_HDR4, P_LEN1, P_LEN2, P_BODY, P_FOOT1, P_FOOT2, P_FOOT3, P_FOOT4 };
     ParseState _pstate = P_IDLE;
     uint16_t _bodyLen = 0, _bodyIdx = 0;
     uint8_t _body[200];
