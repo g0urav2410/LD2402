@@ -30,6 +30,8 @@ void LD2402::loop() {
 }
 
 void LD2402::feedByte(uint8_t b) {
+    _byteCount++;
+    _lastByteMs = millis();
     switch (_pstate) {
         case P_IDLE:
             if (b == ENG_HDR[0]) _pstate = P_HDR2;
@@ -213,8 +215,19 @@ bool LD2402::enableConfig(uint16_t timeoutMs) {
 }
 
 bool LD2402::endConfig(uint16_t timeoutMs) {
-    sendCommand(0x00FE, nullptr, 0);
-    return waitAck(0x00FE, timeoutMs);
+    // Retries, unlike a naive single send: exiting config mode is what resumes
+    // the module's data stream, so a single missed ACK here (garbled by line
+    // noise or the host's own TX traffic on a shared UART) would leave the
+    // module parked in config mode -- silent forever, looking exactly like a
+    // dead sensor. Better to send it a few times; a redundant exit while
+    // already streaming is simply ignored by the module.
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+        while (_serial->available()) _serial->read(); // drop stale bytes first
+        sendCommand(0x00FE, nullptr, 0);
+        if (waitAck(0x00FE, timeoutMs)) return true;
+        delay(100);
+    }
+    return false;
 }
 
 bool LD2402::readFirmwareVersion(String &out, uint16_t timeoutMs) {
@@ -243,8 +256,17 @@ bool LD2402::readSerialNumber(String &out, uint16_t timeoutMs) {
 
 bool LD2402::setOutputMode(bool engineering, uint16_t timeoutMs) {
     uint32_t mode = engineering ? 0x00000004 : 0x00000064;
-    uint8_t val[4] = {(uint8_t)mode, (uint8_t)(mode >> 8), (uint8_t)(mode >> 16), (uint8_t)(mode >> 24)};
-    sendCommand(0x0012, val, 4);
+    // The value field is SIX bytes, not four: a 2-byte "command value" of
+    // 0x0000 followed by the 4-byte mode (manual 5.2.8 -- the send example has
+    // data length 0x0008 = 2-byte command word + 2-byte command value +
+    // 4-byte parameter). Sending only the 4-byte mode made a malformed frame
+    // the module either rejected or misread, which corrupted its output and
+    // left it silent after the switch -- the whole reason engineering mode
+    // "killed" the stream. ESPHome's working component sends the same 6 bytes.
+    uint8_t val[6] = {0x00, 0x00,
+                      (uint8_t)mode, (uint8_t)(mode >> 8),
+                      (uint8_t)(mode >> 16), (uint8_t)(mode >> 24)};
+    sendCommand(0x0012, val, 6);
     // Takes effect once endConfig() is called - the module won't stream
     // engineering frames while still in config mode.
     return waitAck(0x0012, timeoutMs);

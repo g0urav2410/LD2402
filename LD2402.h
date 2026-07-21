@@ -55,6 +55,16 @@ public:
     unsigned long lastUpdateMs() const { return _lastUpdateMs; }
     bool connected() const { return _lastUpdateMs != 0 && millis() - _lastUpdateMs < 2000; }
 
+    // ---- Diagnostics: raw byte flow, independent of frame parsing ----
+    // Every byte the module sends increments this and refreshes lastByteMs(),
+    // even garbage or a half-frame that never parses -- so these tell you
+    // whether the module is transmitting *at all*, separately from whether
+    // its output is being understood. If bytesReceived() keeps climbing but
+    // no frame parses, it's a mode/parse problem; if it stops climbing, the
+    // module itself went silent (power, wiring, or stuck in config mode).
+    uint32_t bytesReceived() const { return _byteCount; }
+    unsigned long lastByteMs() const { return _lastByteMs; }
+
     // ---- Config / calibration (blocking, call rarely) ----
     bool enableConfig(uint16_t timeoutMs = 1000);
     bool endConfig(uint16_t timeoutMs = 1000);
@@ -106,6 +116,8 @@ private:
     bool _engineering = false;
     uint32_t _energy[32] = {0};
     unsigned long _lastUpdateMs = 0;
+    uint32_t _byteCount = 0;        // every byte ever fed, diagnostic
+    unsigned long _lastByteMs = 0;  // millis() of the last byte fed
 
     void handleTextByte(uint8_t b);
     void handleTextLine(String line);
