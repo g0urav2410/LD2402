@@ -95,16 +95,24 @@ gates.
 ## Two ways to feed it data
 
 - **`radar.loop()`** — the sensor has the UART to itself. Call this every
-  `loop()` iteration and read the live getters below. Simplest option.
-- **`radar.feedByte(uint8_t)`** — something else shares the same UART (a
-  debug console, another device). You read the incoming bytes yourself and
-  decide which ones are the radar's; feed those to `feedByte()` one at a
-  time. `radar.midFrame()` tells you whether a binary engineering frame is
-  currently in progress, so a byte-router can keep sending bytes here
-  regardless of their value until the frame completes. This is the pattern
-  used in the [Clockwise](https://github.com/g0urav2410/AjantaClock) project,
-  which shares one UART between this sensor and a USB debug console — see
-  its `main.cpp` for a worked example of the routing logic.
+  `loop()` iteration and read the live getters below. Simplest option, and
+  strongly recommended (see the warning).
+- **`radar.feedByte(uint8_t)`** — feed the parser one byte at a time yourself.
+  `radar.midFrame()` reports whether a binary engineering frame is in
+  progress. Only reach for this if you have a specific reason to touch each
+  byte first.
+
+> **⚠️ Give the sensor its own UART. Don't share it with a log/debug console.**
+> Two hard-won lessons from real use, both worth avoiding:
+> 1. **Your debug *output* on the shared TX goes into the sensor's RX** and
+>    interferes with it accepting commands. This is why the ESPHome component
+>    tells you to set `baud_rate: 0` (disable UART logging). Keep TX quiet.
+> 2. **The sensor's binary energy bytes will masquerade as console *input*.**
+>    An engineering frame's body is arbitrary bytes — feed those to a
+>    command-interpreting console and a stray `0x78`, `'x'`, or a digit gets
+>    executed as a command. If you must share the wire, route by frame
+>    structure and treat every non-frame byte as noise to discard — never as a
+>    command. Simplest is to not share it at all.
 
 ## API reference
 
@@ -145,6 +153,33 @@ gates.
 
 Every blocking call takes an optional `timeoutMs` (default 1000ms, longer for
 `autoGainDone`).
+
+### Configuring while engineering data is streaming
+
+You *can* enter config mode (to read/change settings, calibrate) while the
+sensor is mid engineering-stream — but the enable command's ACK is easily lost
+in that ~775 byte/s flood. `enableConfig()` is therefore **deadline-based**:
+give it a generous timeout (e.g. `enableConfig(2500)`) and it re-sends the
+enable request until it breaks in — the moment the sensor accepts it, the
+stream stops and the ACK comes back cleanly. `endConfig()` likewise retries,
+so a missed exit can't strand the sensor silent in config mode. After you exit,
+streaming resumes on its own. Verified reading/writing settings and running
+calibration live, without dropping engineering data for more than the config
+window.
+
+## What the "gates" are
+
+The sensor divides range into fixed **~0.7 m distance slices called gates**,
+gate 0 nearest. An engineering frame reports, per gate, the reflected signal
+strength — and each gate has two independent detection thresholds:
+
+- **motion** gate/threshold — *moving* targets at that distance (walking)
+- **micro-motion** gate/threshold — *still* targets (sitting, breathing)
+
+Detection at a gate fires when its energy crosses its threshold. Tuning
+per-gate thresholds lets you, e.g., desensitise far gates so movement *behind*
+a wall stops triggering, or raise micro sensitivity at the one distance where
+someone actually sits.
 
 ## Protocol notes
 
