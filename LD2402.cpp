@@ -141,10 +141,19 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         if (!_serial->available()) continue;
         uint8_t b = (uint8_t)_serial->read();
         if (match < 4) {
-            match = (b == CMD_HDR[match]) ? match + 1 : (b == CMD_HDR[0] ? 1 : 0);
-            continue;
+            if (b == CMD_HDR[match]) match++;
+            else match = (b == CMD_HDR[0]) ? 1 : 0;
+            // Only fall through once the 4th header byte (FA) has JUST matched.
+            // The bug this fixes: the old code did `continue` here even on the
+            // 4th match, so the next loop iteration read a fresh byte -- the
+            // frame's first length byte -- and discarded it, then read the
+            // length from the following two bytes. Every response came back
+            // with a garbage length and was rejected, so no read/ACK ever
+            // parsed. `b` here is FA, the last header byte, NOT a length byte;
+            // the length is read fresh below.
+            if (match < 4) continue;
         }
-        // header matched; next 2 bytes = length
+        // header complete; next 2 bytes = length
         uint8_t lenBuf[2];
         uint8_t got = 0;
         while (got < 2 && (uint16_t)(millis() - start) < timeoutMs) {
@@ -204,13 +213,23 @@ bool LD2402::waitEvent(uint16_t word, uint16_t timeoutMs) {
 }
 
 bool LD2402::enableConfig(uint16_t timeoutMs) {
+    // Deadline-based hammering, not a fixed 3 tries. Breaking into config mode
+    // is easy when the module is idle or text-streaming, but HARD while it's
+    // firehosing engineering frames (~128 bytes every 165ms): the enable ACK
+    // is buried in that flood and a few quick attempts miss it. The moment the
+    // module does accept the command it STOPS streaming, so the very next
+    // attempt sees a clean, easily-caught ACK. So we keep re-sending (each
+    // send is harmless -- a redundant enable while already in config just
+    // ACKs) with a short per-attempt wait until we catch one or run out of
+    // budget. Callers give this a generous timeout (a couple of seconds) for
+    // the engineering-mode case; it returns as soon as it succeeds.
     const uint8_t val[2] = {0x01, 0x00};
-    for (uint8_t attempt = 0; attempt < 3; attempt++) {
-        while (_serial->available()) _serial->read(); // drop anything stale
+    const unsigned long deadline = millis() + timeoutMs;
+    do {
+        while (_serial->available()) _serial->read(); // drop buffered stream bytes
         sendCommand(0x00FF, val, 2);
-        if (waitAck(0x00FF, timeoutMs)) return true;
-        delay(300);
-    }
+        if (waitAck(0x00FF, 250)) return true;
+    } while ((long)(deadline - millis()) > 0);
     return false;
 }
 
