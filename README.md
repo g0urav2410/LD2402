@@ -41,13 +41,32 @@ signal-strength-by-gate, remote calibration — which only exists over UART.
 
 ## Install
 
-**PlatformIO** — add to `platformio.ini`:
+### Arduino IDE
+
+1. Download this repo as a ZIP: green **Code** button on the
+   [GitHub page](https://github.com/g0urav2410/LD2402) → **Download ZIP**.
+   (Don't unzip it — the IDE wants the .zip file itself.)
+2. In the Arduino IDE: **Sketch → Include Library → Add .ZIP Library…**,
+   pick the file you just downloaded.
+3. That's it — the library (and its examples) now show up like any other
+   installed library.
+4. Try it: **File → Examples → LD2402 → BasicPresence**, wire the sensor
+   per the table above (T→your board's RX, R→your board's TX, plus power
+   and ground), pick your board under **Tools → Board**, and upload.
+5. Open **Tools → Serial Monitor** (115200 baud) to see presence/distance
+   printed live.
+
+If you'd rather install it once for every sketch instead of per-project:
+clone or download this repo into your Arduino **libraries** folder directly
+(*File → Preferences* shows the "Sketchbook location" — the library goes in
+a `libraries` subfolder there), then restart the IDE.
+
+### PlatformIO
+
+Add to `platformio.ini`:
 ```ini
 lib_deps = https://github.com/g0urav2410/LD2402.git
 ```
-
-**Arduino IDE** — download this repo as a ZIP, then *Sketch → Include
-Library → Add .ZIP Library…*.
 
 ## Quick start
 
