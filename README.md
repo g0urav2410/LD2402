@@ -199,7 +199,7 @@ say outright, found by testing:
 
 ## Related
 
-- [Clockwise](https://github.com/g0urav2410/AjantaClock) — the smart-clock
+- [Clockwise](https://github.com/g0urav2410/Clockwise) — the smart-clock
   project this library was built for; see its firmware for a real
   shared-UART integration, plus an HTTP API and Flutter app built on top of
   this driver's data.
