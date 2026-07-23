@@ -138,7 +138,7 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
     unsigned long start = millis();
     uint8_t match = 0; // how many of CMD_HDR matched so far
     while ((uint16_t)(millis() - start) < timeoutMs) {
-        if (!_serial->available()) continue;
+        if (!_serial->available()) { yield(); continue; }  // let the ESP service WiFi/watchdog while waiting
         uint8_t b = (uint8_t)_serial->read();
         if (match < 4) {
             if (b == CMD_HDR[match]) match++;
@@ -158,6 +158,7 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         uint8_t got = 0;
         while (got < 2 && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) lenBuf[got++] = (uint8_t)_serial->read();
+            else yield();
         }
         if (got < 2) return false;
         uint16_t len = lenBuf[0] | ((uint16_t)lenBuf[1] << 8);
@@ -165,11 +166,13 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         uint16_t idx = 0;
         while (idx < len && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) body[idx++] = (uint8_t)_serial->read();
+            else yield();
         }
         if (idx < len) return false;
         uint8_t foot = 0;
         while (foot < 4 && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) { _serial->read(); foot++; }
+            else yield();
         }
         word = body[0] | ((uint16_t)body[1] << 8);
         bodyLen = len - 2;
