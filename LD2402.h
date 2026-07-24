@@ -1,31 +1,19 @@
-// LD2402 -- Arduino/PlatformIO driver for the Hi-Link HLK-LD2402 24GHz
-// presence radar (moving / micro-motion / static human presence).
+// Driver for the Hi-Link HLK-LD2402 24GHz presence radar.
+// Talks over a hardware UART at 115200 8N1 (module ships fixed at that rate).
+// Self-contained: no dependency on any particular project, only Arduino Stream.
 //
-// https://github.com/g0urav2410/LD2402  -- see README.md for wiring, the full
-// protocol reference, and worked examples.
-//
-// Talks over a hardware UART at 115200 8N1 (the module's baud rate is fixed
-// in firmware, not configurable). Self-contained: no dependency on any
-// particular project, only Arduino's Stream interface, so it works equally
-// on Serial, Serial1/Serial2 (ESP32), or a SoftwareSerial instance.
-//
-// Quick start:
+// Usage:
 //   LD2402 radar;
-//   void setup() { Serial.begin(115200); radar.begin(Serial); }
-//   void loop()  { radar.loop();
-//                  if (radar.presence()) Serial.println(radar.distanceCm()); }
+//   radar.begin(Serial);       // any Stream: Serial, Serial1, SoftwareSerial...
+//   loop() { radar.loop(); }   // parses whatever the module is streaming
 //
 // Live readings (presence/distance/energy) update continuously from whatever
-// report mode the module is in -- normal (text) or engineering (binary, adds
-// the 32 energy gates). See setOutputMode().
+// report mode the module is in - normal (text) or engineering (binary).
 //
 // Config/calibration calls are blocking (they wait for the module's ACK, up
-// to a timeout) and are meant to be called rarely -- from a setup routine or
-// a one-off menu action, not every loop(). Wrap a batch of them in
-// enableConfig()/endConfig() so the module only has to be told once.
-//
-// Sharing the UART with something else (e.g. a debug console)? Don't call
-// loop() -- see feedByte()/midFrame() and the "SharedUART" note in README.md.
+// to a timeout) and are meant to be called rarely - from a setup screen or a
+// one-off API call, not from the render loop. Wrap a batch of them in
+// enableConfig()/endConfig().
 #pragma once
 #include <Arduino.h>
 
@@ -92,6 +80,16 @@ public:
     // Auto threshold calibration. factor 1-20ish (module multiplies by 10 internally).
     bool startCalibration(uint8_t triggerFactor = 3, uint8_t holdFactor = 3, uint8_t microFactor = 3, uint16_t timeoutMs = 1000);
     bool calibrationProgress(uint8_t &percent, uint16_t timeoutMs = 1000); // 100 = done
+
+    // Whether the run that just finished detected human motion in the room
+    // while calibrating (the datasheet requires the room stay clear -- this is
+    // the module's own report of whether that held). Call once calibration
+    // reaches 100%. `gateMask` bit N set means interference was seen at gate N
+    // (~0.7m per gate, near to far). Not waitAck()-based: unlike every other
+    // command here, a non-zero status is a valid *result* (interference
+    // present), not a comms failure, so it can't share waitAck's status-means-
+    // failure handling without losing the gate mask it comes with.
+    bool readCalibrationInterference(bool &hadInterference, uint16_t &gateMask, uint16_t timeoutMs = 1000);
 
     bool saveParameters(uint16_t timeoutMs = 1000); // firmware >= 3.3.2
 

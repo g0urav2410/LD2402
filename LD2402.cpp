@@ -384,6 +384,24 @@ bool LD2402::calibrationProgress(uint8_t &percent, uint16_t timeoutMs) {
     return true;
 }
 
+bool LD2402::readCalibrationInterference(bool &hadInterference, uint16_t &gateMask, uint16_t timeoutMs) {
+    sendCommand(0x0014, nullptr, 0);
+    const uint16_t wantWord = 0x0014 + 0x0100;
+    unsigned long start = millis();
+    while ((uint16_t)(millis() - start) < timeoutMs) {
+        uint16_t gotWord, bodyLen;
+        uint16_t remaining = timeoutMs - (uint16_t)(millis() - start);
+        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return false;
+        if (gotWord != wantWord) continue; // stray frame, keep waiting
+        if (bodyLen < 4) return false;
+        uint16_t status = _body[0] | ((uint16_t)_body[1] << 8);
+        gateMask = _body[2] | ((uint16_t)_body[3] << 8);
+        hadInterference = (status != 0);
+        return true;
+    }
+    return false;
+}
+
 bool LD2402::saveParameters(uint16_t timeoutMs) {
     sendCommand(0x00FD, nullptr, 0);
     if (!waitAck(0x00FD, timeoutMs)) return false;
