@@ -196,6 +196,19 @@ say outright, found by testing:
 - ACK frames echo the command word with `+0x0100` set. Auto-gain's
   completion report is the one exception — it arrives unprompted, carrying
   the bare word `0x00F0`, not an ACK to something you sent.
+- **Gate 15's micro threshold (`0x003F`) doesn't persist via the normal
+  set-then-`saveParameters()` sequence** — confirmed on firmware v3.3.5,
+  deterministic, 100% reproducible. The write itself succeeds and applies
+  live; it's specifically the flash-commit step that silently fails whenever
+  `0x003F` was touched, while every other parameter (including gate 15's own
+  motion threshold, `0x001F`) saves and persists normally. Workaround that's
+  been verified across a real power cycle: `enableConfig()` → set the value
+  → **wait ~200ms** → read it back → set it again → `endConfig()`, **without**
+  calling `saveParameters()` at all. See
+  `LD2402::persistGate15MicroThresholdDb()` for the implementation. Hi-Link
+  support confirmed this workaround but couldn't explain *why* it's needed —
+  their explanation didn't match the documented protocol, so treat this as
+  empirically verified rather than fully understood.
 
 ## Related
 

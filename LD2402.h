@@ -74,6 +74,17 @@ public:
     bool setMicroThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);    // gate 0-15
     bool readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
 
+    // Gate 15's micro threshold (parameter 0x003F) doesn't persist via the
+    // normal setMicroThresholdDb() + saveParameters() sequence -- confirmed
+    // via direct protocol-level testing (see the Hi-Link support ticket
+    // referenced in LEFTOFF.md). Hi-Link's own support team gave a workaround
+    // that empirically works (verified across a real power cycle), even
+    // though their explanation of *why* doesn't match what's actually
+    // documented: set the value, wait briefly, read it back, set it again,
+    // then exit config mode -- WITHOUT calling the normal save command.
+    // Self-contained: manages its own enableConfig()/endConfig().
+    bool persistGate15MicroThresholdDb(float db);
+
     // 0 = not run, 1 = clear, 2 = interference present
     bool readPowerInterference(uint8_t &status, uint16_t timeoutMs = 1000);
 

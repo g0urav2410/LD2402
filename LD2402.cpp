@@ -358,6 +358,19 @@ bool LD2402::readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     return true;
 }
 
+bool LD2402::persistGate15MicroThresholdDb(float db) {
+    enableConfig(2500);
+    bool setOk = setMicroThresholdDb(15, db);
+    delay(200);   // settle time before reading the same address back -- an
+                  // immediate read consistently failed without this pause
+    float readBack = 0;
+    bool readOk = readMicroThresholdDb(15, readBack);
+    bool rewriteOk = setMicroThresholdDb(15, readOk ? readBack : db);
+    endConfig();   // deliberately no saveParameters() call -- that's what
+                   // Hi-Link's own workaround replaces for this one parameter
+    return setOk && readOk && rewriteOk;
+}
+
 bool LD2402::readPowerInterference(uint8_t &status, uint16_t timeoutMs) {
     uint32_t raw;
     if (!readParameterRaw(0x0005, raw, timeoutMs)) return false;
