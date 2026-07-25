@@ -151,7 +151,7 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
     unsigned long start = millis();
     uint8_t match = 0; // how many of CMD_HDR matched so far
     while ((uint16_t)(millis() - start) < timeoutMs) {
-        if (!_serial->available()) { yield(); continue; }  // let the ESP service WiFi/watchdog while waiting
+        if (!_serial->available()) { idleWait(); continue; }  // let the ESP service WiFi/watchdog, and the caller's onIdle hook run
         uint8_t b = readByteTracked();
         if (match < 4) {
             if (b == CMD_HDR[match]) match++;
@@ -171,7 +171,7 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         uint8_t got = 0;
         while (got < 2 && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) lenBuf[got++] = readByteTracked();
-            else yield();
+            else idleWait();
         }
         if (got < 2) return false;
         uint16_t len = lenBuf[0] | ((uint16_t)lenBuf[1] << 8);
@@ -179,13 +179,13 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         uint16_t idx = 0;
         while (idx < len && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) body[idx++] = readByteTracked();
-            else yield();
+            else idleWait();
         }
         if (idx < len) return false;
         uint8_t foot = 0;
         while (foot < 4 && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) { readByteTracked(); foot++; }
-            else yield();
+            else idleWait();
         }
         word = body[0] | ((uint16_t)body[1] << 8);
         bodyLen = len - 2;
@@ -260,7 +260,7 @@ bool LD2402::endConfig(uint16_t timeoutMs) {
         while (_serial->available()) readByteTracked(); // drop stale bytes first
         sendCommand(0x00FE, nullptr, 0);
         if (waitAck(0x00FE, timeoutMs)) return true;
-        delay(100);
+        idleDelay(100);
     }
     return false;
 }
@@ -399,7 +399,7 @@ bool LD2402::readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
 bool LD2402::persistGate15MicroThresholdDb(float db, uint16_t configTimeoutMs) {
     enableConfig(configTimeoutMs);
     bool setOk = setMicroThresholdDb(15, db);
-    delay(200);   // settle time before reading the same address back -- an
+    idleDelay(200);   // settle time before reading the same address back -- an
                   // immediate read consistently failed without this pause
     float readBack = 0;
     bool readOk = readMicroThresholdDb(15, readBack);
@@ -492,7 +492,7 @@ bool LD2402::readCalibrationInterference(bool &hadInterference, uint16_t &gateMa
 bool LD2402::saveParameters(uint16_t timeoutMs) {
     sendCommand(0x00FD, nullptr, 0);
     if (!waitAck(0x00FD, timeoutMs)) return false;
-    delay(500); // module needs time to commit to flash before config mode is exited
+    idleDelay(500); // module needs time to commit to flash before config mode is exited
     return true;
 }
 

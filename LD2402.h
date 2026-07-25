@@ -63,6 +63,20 @@ public:
     uint32_t bytesReceived() const { return _byteCount; }
     unsigned long lastByteMs() const { return _lastByteMs; }
 
+    // Called repeatedly while this driver is blocked waiting on the module --
+    // which is where essentially all of its time goes. Measured on a real
+    // HLK-LD2402: writing all 31 thresholds accounts for only ~0.6s of a ~6.2s
+    // saveAllThresholds(); the remaining ~5.6s is spent waiting for the flash
+    // commit and for config mode to open and close. On a single-threaded board
+    // that is time in which nothing else in your sketch runs, so a display sits
+    // frozen and animations stop.
+    //
+    // Pass a short function that services whatever mustn't stall. It is called
+    // very often, so keep it cheap (an early "has enough time passed?" test is
+    // the usual shape), and do NOT call back into this driver from it -- a
+    // command/response exchange is in progress the whole time.
+    void onIdle(void (*fn)()) { _idle = fn; }
+
     // ---- Config / calibration (blocking, call rarely) ----
     bool enableConfig(uint16_t timeoutMs = 1000);
     bool endConfig(uint16_t timeoutMs = 1000);
@@ -126,7 +140,8 @@ public:
     // nullptr for either array to skip it entirely. saveTimeoutMs defaults
     // higher than the single-gate version -- up to 31 sequential writes
     // precede the save, and committing that many changed parameters measurably
-    // takes longer than after a single-gate write.
+    // takes longer than after a single-gate write. See onIdle() if the several
+    // seconds this takes must not stall the rest of your sketch.
     bool saveAllThresholds(const float motionDb[16], const float microDb[16],
                             uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 8000);
 
@@ -172,6 +187,15 @@ private:
     unsigned long _lastUpdateMs = 0;
     uint32_t _byteCount = 0;        // every byte ever fed, diagnostic
     unsigned long _lastByteMs = 0;  // millis() of the last byte fed
+    void (*_idle)() = nullptr;      // see onIdle()
+
+    // yield() plus the caller's idle hook -- used everywhere this driver waits.
+    void idleWait() { if (_idle) _idle(); yield(); }
+    // delay(), broken up so the idle hook still runs during it.
+    void idleDelay(uint16_t ms) {
+        unsigned long start = millis();
+        while ((uint16_t)(millis() - start) < ms) { idleWait(); }
+    }
 
     void handleTextByte(uint8_t b);
     void handleTextLine(String line);

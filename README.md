@@ -174,6 +174,33 @@ value. For a single change, the `setAndSave*` calls above are simpler.
 Every blocking call takes an optional `timeoutMs` (default 1000ms, longer for
 `autoGainDone`).
 
+### Keeping the rest of your sketch alive: `onIdle()`
+
+The config calls above block, and on a single-threaded board that means nothing
+else in your sketch runs while they do — a display freezes, an animation stops.
+`onIdle()` takes a function that this driver calls repeatedly **whenever it is
+waiting on the module**, which is where nearly all of that time actually goes:
+
+```cpp
+void keepDisplayAlive() {           // called very often -- keep it cheap
+    static unsigned long last = 0;
+    if (millis() - last < 1000) return;
+    last = millis();
+    redrawClock();
+}
+
+radar.onIdle(keepDisplayAlive);     // once, in setup()
+```
+
+Measured on a real module, a `saveAllThresholds()` totalling **6.2s** spends only
+about **0.6s** in the 31 writes themselves (~19ms each) — the other **5.6s** is
+spent waiting for the flash commit and for config mode to open and close. So a
+hook that only ran between writes would cover under 10% of the stall; this one
+covers essentially all of it.
+
+Keep the callback short, and **do not call back into this driver from it** — a
+command/response exchange is in progress the entire time.
+
 ### Configuring while engineering data is streaming
 
 You *can* enter config mode (to read/change settings, calibrate) while the
