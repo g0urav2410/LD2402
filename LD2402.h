@@ -43,6 +43,16 @@ public:
     unsigned long lastUpdateMs() const { return _lastUpdateMs; }
     bool connected() const { return _lastUpdateMs != 0 && millis() - _lastUpdateMs < 2000; }
 
+    // Everything above, bundled into one call -- for the common case of just
+    // wanting the current status without calling four separate getters.
+    struct Reading {
+        bool presence, moving, still, connected;
+        uint16_t distanceCm;
+    };
+    Reading read() const {
+        return {presence(), isMoving(), isStill(), connected(), distanceCm()};
+    }
+
     // ---- Diagnostics: raw byte flow, independent of frame parsing ----
     // Every byte the module sends increments this and refreshes lastByteMs(),
     // even garbage or a half-frame that never parses -- so these tell you
@@ -63,11 +73,18 @@ public:
     // true = binary engineering frames (presence+distance+32 energy gates)
     // false = plain text "OFF" / "distance : NN" (factory default)
     bool setOutputMode(bool engineering, uint16_t timeoutMs = 1000);
+    // Convenience: wraps enableConfig()/setOutputMode()/endConfig() in one
+    // call, own session -- same pattern as the setAndSave* functions below.
+    bool setEngineeringMode(bool on);
 
     bool setMaxDistanceMeters(float meters, uint16_t timeoutMs = 1000);   // 0.7-10.0m
     bool readMaxDistanceMeters(float &meters, uint16_t timeoutMs = 1000);
     bool setDisappearDelaySec(uint16_t seconds, uint16_t timeoutMs = 1000);
     bool readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs = 1000);
+    // Convenience: set + persist in one call, own config session -- same
+    // pattern as the threshold convenience methods below.
+    bool setAndSaveMaxDistanceMeters(float meters);
+    bool setAndSaveDisappearDelaySec(uint16_t seconds);
 
     bool setMotionThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);   // gate 0-15
     bool readMotionThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
@@ -84,6 +101,22 @@ public:
     // then exit config mode -- WITHOUT calling the normal save command.
     // Self-contained: manages its own enableConfig()/endConfig().
     bool persistGate15MicroThresholdDb(float db);
+
+    // ---- Convenience: set + persist in one call, own config session ----
+    // Callers who just want "change this threshold and have it stick" can use
+    // these instead of manually wrapping setXThresholdDb()/saveParameters() in
+    // enableConfig()/endConfig() -- and setAndSaveMicroThresholdDb() routes
+    // gate 15 through persistGate15MicroThresholdDb() automatically, so
+    // callers don't need to know that quirk exists.
+    bool setAndSaveMotionThresholdDb(uint8_t gate, float db);
+    bool setAndSaveMicroThresholdDb(uint8_t gate, float db);
+
+    // Writes all 16 motion + all 16 micro thresholds and persists them all in
+    // one efficient session (one enableConfig()/endConfig() pair covers 31 of
+    // the 32 values; gate 15's micro threshold needs its own separate
+    // procedure regardless, same as the single-gate version above). Pass
+    // nullptr for either array to skip it entirely.
+    bool saveAllThresholds(const float motionDb[16], const float microDb[16]);
 
     // 0 = not run, 1 = clear, 2 = interference present
     bool readPowerInterference(uint8_t &status, uint16_t timeoutMs = 1000);

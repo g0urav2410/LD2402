@@ -294,6 +294,13 @@ bool LD2402::setOutputMode(bool engineering, uint16_t timeoutMs) {
     return waitAck(0x0012, timeoutMs);
 }
 
+bool LD2402::setEngineeringMode(bool on) {
+    enableConfig(2500);
+    bool ok = setOutputMode(on);
+    endConfig();
+    return ok;
+}
+
 bool LD2402::readParameterRaw(uint16_t id, uint32_t &value, uint16_t timeoutMs) {
     uint8_t val[2] = {(uint8_t)(id & 0xFF), (uint8_t)(id >> 8)};
     sendCommand(0x0008, val, 2);
@@ -335,6 +342,22 @@ bool LD2402::readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs) {
     return true;
 }
 
+bool LD2402::setAndSaveMaxDistanceMeters(float meters) {
+    enableConfig(2500);
+    bool ok = setMaxDistanceMeters(meters);
+    bool saved = saveParameters(3000);
+    endConfig();
+    return ok && saved;
+}
+
+bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds) {
+    enableConfig(2500);
+    bool ok = setDisappearDelaySec(seconds);
+    bool saved = saveParameters(3000);
+    endConfig();
+    return ok && saved;
+}
+
 bool LD2402::setMotionThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     return setParameterRaw(0x0010 + gate, rawFromDb(db), timeoutMs);
@@ -369,6 +392,40 @@ bool LD2402::persistGate15MicroThresholdDb(float db) {
     endConfig();   // deliberately no saveParameters() call -- that's what
                    // Hi-Link's own workaround replaces for this one parameter
     return setOk && readOk && rewriteOk;
+}
+
+bool LD2402::setAndSaveMotionThresholdDb(uint8_t gate, float db) {
+    if (gate > 15) return false;
+    enableConfig(2500);
+    bool ok = setMotionThresholdDb(gate, db);
+    bool saved = saveParameters(3000);
+    endConfig();
+    return ok && saved;
+}
+
+bool LD2402::setAndSaveMicroThresholdDb(uint8_t gate, float db) {
+    if (gate > 15) return false;
+    if (gate == 15) return persistGate15MicroThresholdDb(db);   // known quirk, own procedure
+    enableConfig(2500);
+    bool ok = setMicroThresholdDb(gate, db);
+    bool saved = saveParameters(3000);
+    endConfig();
+    return ok && saved;
+}
+
+bool LD2402::saveAllThresholds(const float motionDb[16], const float microDb[16]) {
+    enableConfig(2500);
+    bool ok = true;
+    if (motionDb) for (uint8_t i = 0; i < 16; i++) ok &= setMotionThresholdDb(i, motionDb[i]);
+    // Gate 15's micro threshold is deliberately excluded here -- it needs its
+    // own separate procedure (persistGate15MicroThresholdDb()) regardless of
+    // what else is in this session, and including it would fail the save for
+    // every other value bundled alongside it.
+    if (microDb) for (uint8_t i = 0; i < 15; i++) ok &= setMicroThresholdDb(i, microDb[i]);
+    bool saved = saveParameters(8000);   // longer: up to 31 sequential writes precede this
+    endConfig();
+    if (microDb) ok &= persistGate15MicroThresholdDb(microDb[15]);
+    return ok && saved;
 }
 
 bool LD2402::readPowerInterference(uint8_t &status, uint16_t timeoutMs) {

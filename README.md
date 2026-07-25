@@ -120,6 +120,7 @@ gates.
 
 | Call | Returns |
 |---|---|
+| `read()` | `Reading{presence, moving, still, connected, distanceCm}` — everything below, in one call |
 | `presence()` | `bool` — someone detected (moving or still) |
 | `isMoving()` / `isStill()` | `bool` — which kind of presence |
 | `distanceCm()` | `uint16_t` — distance to the target |
@@ -132,23 +133,42 @@ gates.
 
 | Call | Effect |
 |---|---|
-| `setOutputMode(bool engineering)` | `false` = plain "OFF"/"distance : NN" text (factory default). `true` = binary frames with distance + all 32 energy gates. **Takes effect once `endConfig()` is called** — the sensor doesn't stream while still in config mode. |
+| `setEngineeringMode(bool on)` | **Preferred** — one call, manages its own config session. `false` = plain "OFF"/"distance : NN" text (factory default). `true` = binary frames with distance + all 32 energy gates. |
+| `setOutputMode(bool engineering)` | Raw version — you wrap `enableConfig()`/`endConfig()` yourself. Only reach for this inside a batch of other config calls. |
 
-### Configuration (all blocking — wrap a batch in `enableConfig()`/`endConfig()`)
+### Settings that need to persist — one call each
+
+These set the value **and** commit it to the sensor's own flash, each managing
+its own config session. This is what you want almost all the time — a value
+set without saving reverts the moment the sensor loses power.
+
+| Call | Sets |
+|---|---|
+| `setAndSaveMaxDistanceMeters(float)` | Max detection range, 0.7–10.0m |
+| `setAndSaveDisappearDelaySec(uint16_t)` | How long presence is held after the target leaves |
+| `setAndSaveMotionThresholdDb(gate, db)` | One gate's motion threshold, gate 0–15 |
+| `setAndSaveMicroThresholdDb(gate, db)` | One gate's micro/still threshold, gate 0–15 — automatically routes gate 15 through its known flash-persistence quirk, no special handling needed from you |
+| `saveAllThresholds(motionDb[16], microDb[16])` | All 32 thresholds at once, in one efficient session (pass `nullptr` for either array to skip it) — use this instead of 16 individual calls when applying a full set |
+
+### Raw configuration (all blocking — wrap a batch in `enableConfig()`/`endConfig()` yourself)
+
+Reach for these only when you're batching several changes in one session for
+efficiency (like `saveAllThresholds()` does internally), or reading a current
+value. For a single change, the `setAndSave*` calls above are simpler.
 
 | Call | Notes |
 |---|---|
 | `enableConfig()` / `endConfig()` | Required bracket around every call below. Retries internally on entry. |
 | `readFirmwareVersion(String&)` / `readSerialNumber(String&)` | |
-| `setMaxDistanceMeters(float)` / `readMaxDistanceMeters(float&)` | 0.7–10.0m |
-| `setDisappearDelaySec(uint16_t)` / `readDisappearDelaySec(uint16_t&)` | How long presence is held after the target leaves, 0–65535s |
-| `setMotionThresholdDb(gate, db)` / `readMotionThresholdDb(gate, db&)` | gate 0–15 |
-| `setMicroThresholdDb(gate, db)` / `readMicroThresholdDb(gate, db&)` | gate 0–15 |
+| `setMaxDistanceMeters(float)` / `readMaxDistanceMeters(float&)` | 0.7–10.0m, live only |
+| `setDisappearDelaySec(uint16_t)` / `readDisappearDelaySec(uint16_t&)` | Live only |
+| `setMotionThresholdDb(gate, db)` / `readMotionThresholdDb(gate, db&)` | gate 0–15, live only |
+| `setMicroThresholdDb(gate, db)` / `readMicroThresholdDb(gate, db&)` | gate 0–15, live only |
 | `readPowerInterference(uint8_t&)` | 0 not run, 1 clear, 2 interference detected |
 | `startCalibration(trigger, hold, micro)` | Auto-generates thresholds for the room. Factors default 3. |
 | `calibrationProgress(uint8_t&)` | 0–100, poll until 100 |
 | `startAutoGain()` / `autoGainDone(timeoutMs)` | Corrects a saturated front-end. `autoGainDone` waits for the sensor's own completion push — it isn't a normal ACK. |
-| `saveParameters()` | Commits to the sensor's own flash. Everything above is otherwise live-only and reverts on power loss. |
+| `saveParameters()` | Commits whatever's currently set to the sensor's own flash. Prefer `setAndSave*` above for a single value. |
 | `readParameterRaw(id, value&)` / `setParameterRaw(id, value)` | Escape hatch for any parameter ID not wrapped above |
 
 Every blocking call takes an optional `timeoutMs` (default 1000ms, longer for
