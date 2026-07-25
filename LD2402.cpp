@@ -134,12 +134,25 @@ void LD2402::sendCommand(uint16_t word, const uint8_t *value, uint16_t valueLen)
     _serial->write(CMD_FOOT, 4);
 }
 
+// Reads one byte and updates the same "have I heard from the sensor"
+// diagnostics feedByte() does for the streaming parser -- readFrameBlocking()
+// used to bypass those entirely, so a caller checking lastByteMs()/
+// connected() during/right after a config-mode session (which can run
+// several seconds for a bulk save) would see it as stale even though the
+// sensor was actively exchanging ACKs the whole time.
+uint8_t LD2402::readByteTracked() {
+    uint8_t b = (uint8_t)_serial->read();
+    _byteCount++;
+    _lastByteMs = millis();
+    return b;
+}
+
 bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen, uint16_t maxBody, uint16_t timeoutMs) {
     unsigned long start = millis();
     uint8_t match = 0; // how many of CMD_HDR matched so far
     while ((uint16_t)(millis() - start) < timeoutMs) {
         if (!_serial->available()) { yield(); continue; }  // let the ESP service WiFi/watchdog while waiting
-        uint8_t b = (uint8_t)_serial->read();
+        uint8_t b = readByteTracked();
         if (match < 4) {
             if (b == CMD_HDR[match]) match++;
             else match = (b == CMD_HDR[0]) ? 1 : 0;
@@ -157,7 +170,7 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         uint8_t lenBuf[2];
         uint8_t got = 0;
         while (got < 2 && (uint16_t)(millis() - start) < timeoutMs) {
-            if (_serial->available()) lenBuf[got++] = (uint8_t)_serial->read();
+            if (_serial->available()) lenBuf[got++] = readByteTracked();
             else yield();
         }
         if (got < 2) return false;
@@ -165,13 +178,13 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         if (len < 2 || len > maxBody) return false;
         uint16_t idx = 0;
         while (idx < len && (uint16_t)(millis() - start) < timeoutMs) {
-            if (_serial->available()) body[idx++] = (uint8_t)_serial->read();
+            if (_serial->available()) body[idx++] = readByteTracked();
             else yield();
         }
         if (idx < len) return false;
         uint8_t foot = 0;
         while (foot < 4 && (uint16_t)(millis() - start) < timeoutMs) {
-            if (_serial->available()) { _serial->read(); foot++; }
+            if (_serial->available()) { readByteTracked(); foot++; }
             else yield();
         }
         word = body[0] | ((uint16_t)body[1] << 8);
@@ -229,7 +242,7 @@ bool LD2402::enableConfig(uint16_t timeoutMs) {
     const uint8_t val[2] = {0x01, 0x00};
     const unsigned long deadline = millis() + timeoutMs;
     do {
-        while (_serial->available()) _serial->read(); // drop buffered stream bytes
+        while (_serial->available()) readByteTracked(); // drop buffered stream bytes
         sendCommand(0x00FF, val, 2);
         if (waitAck(0x00FF, 250)) return true;
     } while ((long)(deadline - millis()) > 0);
@@ -244,7 +257,7 @@ bool LD2402::endConfig(uint16_t timeoutMs) {
     // dead sensor. Better to send it a few times; a redundant exit while
     // already streaming is simply ignored by the module.
     for (uint8_t attempt = 0; attempt < 3; attempt++) {
-        while (_serial->available()) _serial->read(); // drop stale bytes first
+        while (_serial->available()) readByteTracked(); // drop stale bytes first
         sendCommand(0x00FE, nullptr, 0);
         if (waitAck(0x00FE, timeoutMs)) return true;
         delay(100);

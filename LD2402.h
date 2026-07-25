@@ -179,6 +179,10 @@ private:
 
     // --- command/ACK framing (FD FC FB FA ... 04 03 02 01) ---
     void sendCommand(uint16_t word, const uint8_t *value, uint16_t valueLen);
+    // Reads one byte and updates bytesReceived()/lastByteMs() -- same
+    // diagnostics feedByte() updates for the streaming parser, so those stay
+    // accurate during config-mode command exchanges too, not just streaming.
+    uint8_t readByteTracked();
     // Blocks reading raw bytes (bypassing the streaming parser) until a full
     // FD-FC-FB-FA frame arrives or timeoutMs elapses. Returns the frame's
     // word field and body (word+status, or word+status+extra).
