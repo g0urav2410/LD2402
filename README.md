@@ -88,9 +88,10 @@ void loop() {
 }
 ```
 
-See `examples/BasicPresence` for the full version, and
-`examples/FullControl` for engineering mode + calibration + all 32 energy
-gates.
+See `examples/BasicPresence` for the full version, `examples/FullControl` for
+engineering mode + calibration + all 32 energy gates, and
+`examples/NonBlockingUI` for keeping a display or animation running during the
+library's slow configuration calls.
 
 ## Two ways to feed it data
 
@@ -170,36 +171,87 @@ value. For a single change, the `setAndSave*` calls above are simpler.
 | `startAutoGain()` / `autoGainDone(timeoutMs)` | Corrects a saturated front-end. `autoGainDone` waits for the sensor's own completion push — it isn't a normal ACK. |
 | `saveParameters()` | Commits whatever's currently set to the sensor's own flash. Prefer `setAndSave*` above for a single value. |
 | `readParameterRaw(id, value&)` / `setParameterRaw(id, value)` | Escape hatch for any parameter ID not wrapped above |
+| `onIdle(fn)` | Runs `fn` while any of the above is waiting on the module, so your display/UI doesn't freeze — see [below](#keeping-the-rest-of-your-sketch-alive-onidle) |
 
 Every blocking call takes an optional `timeoutMs` (default 1000ms, longer for
 `autoGainDone`).
 
 ### Keeping the rest of your sketch alive: `onIdle()`
 
-The config calls above block, and on a single-threaded board that means nothing
-else in your sketch runs while they do — a display freezes, an animation stops.
-`onIdle()` takes a function that this driver calls repeatedly **whenever it is
-waiting on the module**, which is where nearly all of that time actually goes:
+Every configuration call above blocks: it sends a command and waits for the
+module to reply. On a single-threaded board — any AVR, an ESP8266, a
+single-task ESP32 sketch — **nothing else in your sketch runs during that
+wait**. A display freezes, an animation stops, a button goes unread.
+
+`onIdle()` hands that time back. Give it a function, and the driver calls it
+repeatedly wherever it would otherwise just be waiting.
 
 ```cpp
-void keepDisplayAlive() {           // called very often -- keep it cheap
+void keepUiAlive() {
     static unsigned long last = 0;
-    if (millis() - last < 1000) return;
+    if (millis() - last < 1000) return;   // <- the important line
     last = millis();
-    redrawClock();
+    redrawDisplay();
 }
 
-radar.onIdle(keepDisplayAlive);     // once, in setup()
+void setup() {
+    radar.begin(Serial);
+    radar.onIdle(keepUiAlive);            // that's the whole integration
+}
 ```
 
-Measured on a real module, a `saveAllThresholds()` totalling **6.2s** spends only
-about **0.6s** in the 31 writes themselves (~19ms each) — the other **5.6s** is
-spent waiting for the flash commit and for config mode to open and close. So a
-hook that only ran between writes would cover under 10% of the stall; this one
-covers essentially all of it.
+That's it. One call, once, and every slow operation — reading settings, saving
+thresholds, calibration, auto-gain — stops freezing your sketch.
 
-Keep the callback short, and **do not call back into this driver from it** — a
-command/response exchange is in progress the entire time.
+Run **`examples/NonBlockingUI`** to see it: it blinks the built-in LED while
+reading all 32 thresholds, and `n` toggles the hook on and off so you can watch
+the LED freeze and unfreeze.
+
+#### Writing the callback
+
+**It is called about 8,000 times a second.** That is not an exaggeration —
+while waiting for a reply the driver spins in a tight loop, and your function
+runs on every pass.
+
+So the first line must be a cheap test that usually returns immediately. The
+`if (millis() - last < interval) return;` shape above is the standard way; in a
+measured run of a bulk save the callback was entered **50,012 times and did real
+work 12 times**. Everything else was that early return.
+
+Get this wrong and you make things worse: a callback costing 1ms, called 8,000
+times, adds 8 seconds to a 6-second operation.
+
+Two rules:
+
+- **Keep it cheap.** Early-out first, work second.
+- **Never call `radar.*` from inside it.** A command/response exchange is in
+  progress the entire time; re-entering the driver will corrupt it.
+
+Safe things to do: refresh a display, toggle a pin, feed a hardware watchdog,
+step an animation. Unsafe: anything that talks to this sensor, anything that
+blocks, anything doing heavy I/O.
+
+#### Why the hook is where it is
+
+Worth knowing if you're wondering whether it covers the case you care about.
+Measured on a real HLK-LD2402, a `saveAllThresholds()` totalling **6.2s**:
+
+| Phase | Time |
+|---|---|
+| The 31 threshold writes | ~0.6s (19ms each) |
+| Flash commit, config mode opening and closing | **~5.6s** |
+
+The writes are under 10% of it. So the hook isn't called "between writes" — it
+sits at the driver's actual wait points, including the fixed settle delays,
+which is why a single `onIdle()` covers every blocking call in the library
+rather than one of them.
+
+#### Compatibility
+
+`onIdle()` is entirely optional. Without it, the driver behaves exactly as it
+always has — the internal wait is a plain `yield()`, unchanged. Nothing about
+the protocol, the timing, or any other call is affected by adding or omitting
+it, so upgrading is safe.
 
 ### Configuring while engineering data is streaming
 
