@@ -75,16 +75,20 @@ public:
     bool setOutputMode(bool engineering, uint16_t timeoutMs = 1000);
     // Convenience: wraps enableConfig()/setOutputMode()/endConfig() in one
     // call, own session -- same pattern as the setAndSave* functions below.
-    bool setEngineeringMode(bool on);
+    // configTimeoutMs is passed to enableConfig(); default matches every
+    // other convenience function here, but a caller doing frequent quick
+    // checks (like a periodic recovery poll) can pass a much shorter one.
+    bool setEngineeringMode(bool on, uint16_t configTimeoutMs = 2500);
 
     bool setMaxDistanceMeters(float meters, uint16_t timeoutMs = 1000);   // 0.7-10.0m
     bool readMaxDistanceMeters(float &meters, uint16_t timeoutMs = 1000);
     bool setDisappearDelaySec(uint16_t seconds, uint16_t timeoutMs = 1000);
     bool readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs = 1000);
     // Convenience: set + persist in one call, own config session -- same
-    // pattern as the threshold convenience methods below.
-    bool setAndSaveMaxDistanceMeters(float meters);
-    bool setAndSaveDisappearDelaySec(uint16_t seconds);
+    // pattern as the threshold convenience methods below. configTimeoutMs is
+    // passed to enableConfig(), saveTimeoutMs to saveParameters().
+    bool setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
+    bool setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
     bool setMotionThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);   // gate 0-15
     bool readMotionThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
@@ -99,24 +103,32 @@ public:
     // though their explanation of *why* doesn't match what's actually
     // documented: set the value, wait briefly, read it back, set it again,
     // then exit config mode -- WITHOUT calling the normal save command.
-    // Self-contained: manages its own enableConfig()/endConfig().
-    bool persistGate15MicroThresholdDb(float db);
+    // Self-contained: manages its own enableConfig()/endConfig(). The 200ms
+    // settle delay between the write and the read-back is fixed -- it's part
+    // of what makes the workaround reliable, not a tunable timeout.
+    bool persistGate15MicroThresholdDb(float db, uint16_t configTimeoutMs = 2500);
 
     // ---- Convenience: set + persist in one call, own config session ----
     // Callers who just want "change this threshold and have it stick" can use
     // these instead of manually wrapping setXThresholdDb()/saveParameters() in
     // enableConfig()/endConfig() -- and setAndSaveMicroThresholdDb() routes
     // gate 15 through persistGate15MicroThresholdDb() automatically, so
-    // callers don't need to know that quirk exists.
-    bool setAndSaveMotionThresholdDb(uint8_t gate, float db);
-    bool setAndSaveMicroThresholdDb(uint8_t gate, float db);
+    // callers don't need to know that quirk exists. configTimeoutMs is passed
+    // to enableConfig(), saveTimeoutMs to saveParameters() (ignored for gate
+    // 15's micro threshold, which never calls saveParameters() at all).
+    bool setAndSaveMotionThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
+    bool setAndSaveMicroThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
     // Writes all 16 motion + all 16 micro thresholds and persists them all in
     // one efficient session (one enableConfig()/endConfig() pair covers 31 of
     // the 32 values; gate 15's micro threshold needs its own separate
     // procedure regardless, same as the single-gate version above). Pass
-    // nullptr for either array to skip it entirely.
-    bool saveAllThresholds(const float motionDb[16], const float microDb[16]);
+    // nullptr for either array to skip it entirely. saveTimeoutMs defaults
+    // higher than the single-gate version -- up to 31 sequential writes
+    // precede the save, and committing that many changed parameters measurably
+    // takes longer than after a single-gate write.
+    bool saveAllThresholds(const float motionDb[16], const float microDb[16],
+                            uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 8000);
 
     // 0 = not run, 1 = clear, 2 = interference present
     bool readPowerInterference(uint8_t &status, uint16_t timeoutMs = 1000);
