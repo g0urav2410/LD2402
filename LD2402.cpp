@@ -113,10 +113,10 @@ void LD2402::handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     _lastUpdateMs = millis();
 }
 
-float LD2402::motionEnergyDb(uint8_t gate) const {
+float LD2402::triggerEnergyDb(uint8_t gate) const {
     return gate < 16 ? dbFromRaw(_energy[gate]) : NAN;
 }
-float LD2402::microEnergyDb(uint8_t gate) const {
+float LD2402::motionlessEnergyDb(uint8_t gate) const {
     return gate < 16 ? dbFromRaw(_energy[16 + gate]) : NAN;
 }
 
@@ -373,22 +373,22 @@ bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeou
     return ok && saved;
 }
 
-bool LD2402::setMotionThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
+bool LD2402::setTriggerThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     return setParameterRaw(0x0010 + gate, rawFromDb(db), timeoutMs);
 }
-bool LD2402::readMotionThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
+bool LD2402::readTriggerThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     uint32_t raw;
     if (!readParameterRaw(0x0010 + gate, raw, timeoutMs)) return false;
     db = dbFromRaw(raw);
     return true;
 }
-bool LD2402::setMicroThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
+bool LD2402::setMotionlessThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     return setParameterRaw(0x0030 + gate, rawFromDb(db), timeoutMs);
 }
-bool LD2402::readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
+bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     uint32_t raw;
     if (!readParameterRaw(0x0030 + gate, raw, timeoutMs)) return false;
@@ -396,52 +396,52 @@ bool LD2402::readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     return true;
 }
 
-bool LD2402::persistGate15MicroThresholdDb(float db, uint16_t configTimeoutMs) {
+bool LD2402::persistGate15MotionlessThresholdDb(float db, uint16_t configTimeoutMs) {
     enableConfig(configTimeoutMs);
-    bool setOk = setMicroThresholdDb(15, db);
+    bool setOk = setMotionlessThresholdDb(15, db);
     idleDelay(200);   // settle time before reading the same address back -- an
                   // immediate read consistently failed without this pause
     float readBack = 0;
-    bool readOk = readMicroThresholdDb(15, readBack);
-    bool rewriteOk = setMicroThresholdDb(15, readOk ? readBack : db);
+    bool readOk = readMotionlessThresholdDb(15, readBack);
+    bool rewriteOk = setMotionlessThresholdDb(15, readOk ? readBack : db);
     endConfig(configTimeoutMs);   // deliberately no saveParameters() call --
                    // that's what Hi-Link's own workaround replaces for this
                    // one parameter
     return setOk && readOk && rewriteOk;
 }
 
-bool LD2402::setAndSaveMotionThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
     enableConfig(configTimeoutMs);
-    bool ok = setMotionThresholdDb(gate, db);
+    bool ok = setTriggerThresholdDb(gate, db);
     bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok && saved;
 }
 
-bool LD2402::setAndSaveMicroThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
-    if (gate == 15) return persistGate15MicroThresholdDb(db, configTimeoutMs);   // known quirk, own procedure
+    if (gate == 15) return persistGate15MotionlessThresholdDb(db, configTimeoutMs);   // known quirk, own procedure
     enableConfig(configTimeoutMs);
-    bool ok = setMicroThresholdDb(gate, db);
+    bool ok = setMotionlessThresholdDb(gate, db);
     bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok && saved;
 }
 
-bool LD2402::saveAllThresholds(const float motionDb[16], const float microDb[16],
+bool LD2402::saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     enableConfig(configTimeoutMs);
     bool ok = true;
-    if (motionDb) for (uint8_t i = 0; i < 16; i++) ok &= setMotionThresholdDb(i, motionDb[i]);
-    // Gate 15's micro threshold is deliberately excluded here -- it needs its
-    // own separate procedure (persistGate15MicroThresholdDb()) regardless of
+    if (triggerDb) for (uint8_t i = 0; i < 16; i++) ok &= setTriggerThresholdDb(i, triggerDb[i]);
+    // Gate 15's motionless threshold is deliberately excluded here -- it needs its
+    // own separate procedure (persistGate15MotionlessThresholdDb()) regardless of
     // what else is in this session, and including it would fail the save for
     // every other value bundled alongside it.
-    if (microDb) for (uint8_t i = 0; i < 15; i++) ok &= setMicroThresholdDb(i, microDb[i]);
+    if (motionlessDb) for (uint8_t i = 0; i < 15; i++) ok &= setMotionlessThresholdDb(i, motionlessDb[i]);
     bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
-    if (microDb) ok &= persistGate15MicroThresholdDb(microDb[15], configTimeoutMs);
+    if (motionlessDb) ok &= persistGate15MotionlessThresholdDb(motionlessDb[15], configTimeoutMs);
     return ok && saved;
 }
 

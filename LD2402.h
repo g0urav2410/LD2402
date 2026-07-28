@@ -38,8 +38,8 @@ public:
     uint16_t distanceCm() const { return _distanceCm; }
     bool haveEnergyGates() const { return _engineering; }
     // gate 0-15, near to far. NAN if no engineering data received yet.
-    float motionEnergyDb(uint8_t gate) const;
-    float microEnergyDb(uint8_t gate) const;
+    float triggerEnergyDb(uint8_t gate) const;
+    float motionlessEnergyDb(uint8_t gate) const;
     unsigned long lastUpdateMs() const { return _lastUpdateMs; }
     bool connected() const { return _lastUpdateMs != 0 && millis() - _lastUpdateMs < 2000; }
 
@@ -104,13 +104,13 @@ public:
     bool setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
     bool setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
-    bool setMotionThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);   // gate 0-15
-    bool readMotionThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
-    bool setMicroThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);    // gate 0-15
-    bool readMicroThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
+    bool setTriggerThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);   // gate 0-15
+    bool readTriggerThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
+    bool setMotionlessThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);    // gate 0-15
+    bool readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
 
-    // Gate 15's micro threshold (parameter 0x003F) doesn't persist via the
-    // normal setMicroThresholdDb() + saveParameters() sequence -- confirmed
+    // Gate 15's motionless threshold (parameter 0x003F) doesn't persist via the
+    // normal setMotionlessThresholdDb() + saveParameters() sequence -- confirmed
     // via direct protocol-level testing (see the Hi-Link support ticket
     // referenced in LEFTOFF.md). Hi-Link's own support team gave a workaround
     // that empirically works (verified across a real power cycle), even
@@ -120,29 +120,29 @@ public:
     // Self-contained: manages its own enableConfig()/endConfig(). The 200ms
     // settle delay between the write and the read-back is fixed -- it's part
     // of what makes the workaround reliable, not a tunable timeout.
-    bool persistGate15MicroThresholdDb(float db, uint16_t configTimeoutMs = 2500);
+    bool persistGate15MotionlessThresholdDb(float db, uint16_t configTimeoutMs = 2500);
 
     // ---- Convenience: set + persist in one call, own config session ----
     // Callers who just want "change this threshold and have it stick" can use
     // these instead of manually wrapping setXThresholdDb()/saveParameters() in
-    // enableConfig()/endConfig() -- and setAndSaveMicroThresholdDb() routes
-    // gate 15 through persistGate15MicroThresholdDb() automatically, so
+    // enableConfig()/endConfig() -- and setAndSaveMotionlessThresholdDb() routes
+    // gate 15 through persistGate15MotionlessThresholdDb() automatically, so
     // callers don't need to know that quirk exists. configTimeoutMs is passed
     // to enableConfig(), saveTimeoutMs to saveParameters() (ignored for gate
-    // 15's micro threshold, which never calls saveParameters() at all).
-    bool setAndSaveMotionThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
-    bool setAndSaveMicroThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
+    // 15's motionless threshold, which never calls saveParameters() at all).
+    bool setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
+    bool setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
-    // Writes all 16 motion + all 16 micro thresholds and persists them all in
+    // Writes all 16 trigger + all 16 motionless thresholds and persists them all in
     // one efficient session (one enableConfig()/endConfig() pair covers 31 of
-    // the 32 values; gate 15's micro threshold needs its own separate
+    // the 32 values; gate 15's motionless threshold needs its own separate
     // procedure regardless, same as the single-gate version above). Pass
     // nullptr for either array to skip it entirely. saveTimeoutMs defaults
     // higher than the single-gate version -- up to 31 sequential writes
     // precede the save, and committing that many changed parameters measurably
     // takes longer than after a single-gate write. See onIdle() if the several
     // seconds this takes must not stall the rest of your sketch.
-    bool saveAllThresholds(const float motionDb[16], const float microDb[16],
+    bool saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                             uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 8000);
 
     // 0 = not run, 1 = clear, 2 = interference present
