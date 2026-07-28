@@ -126,7 +126,7 @@ library's slow configuration calls.
 | `isMoving()` / `isStill()` | `bool` — which kind of presence |
 | `distanceCm()` | `uint16_t` — distance to the target |
 | `haveEnergyGates()` | `bool` — true once an engineering frame has arrived |
-| `motionEnergyDb(gate)` / `microEnergyDb(gate)` | `float` dB, gate 0–15, near → far |
+| `triggerEnergyDb(gate)` / `motionlessEnergyDb(gate)` | `float` dB, gate 0–15, near → far |
 | `connected()` | `bool` — data received in the last 2s |
 | `lastUpdateMs()` | `unsigned long` — `millis()` of the last reading |
 
@@ -147,8 +147,8 @@ set without saving reverts the moment the sensor loses power.
 |---|---|
 | `setAndSaveMaxDistanceMeters(float)` | Max detection range, 0.7–10.0m |
 | `setAndSaveDisappearDelaySec(uint16_t)` | How long presence is held after the target leaves |
-| `setAndSaveMotionThresholdDb(gate, db)` | One gate's motion threshold, gate 0–15 |
-| `setAndSaveMicroThresholdDb(gate, db)` | One gate's micro/still threshold, gate 0–15 — automatically routes gate 15 through its known flash-persistence quirk, no special handling needed from you |
+| `setAndSaveTriggerThresholdDb(gate, db)` | One gate's trigger threshold, gate 0–15 |
+| `setAndSaveMotionlessThresholdDb(gate, db)` | One gate's motionless/still threshold, gate 0–15 — automatically routes gate 15 through its known flash-persistence quirk, no special handling needed from you |
 | `saveAllThresholds(motionDb[16], microDb[16])` | All 32 thresholds at once, in one efficient session (pass `nullptr` for either array to skip it) — use this instead of 16 individual calls when applying a full set |
 
 ### Raw configuration (all blocking — wrap a batch in `enableConfig()`/`endConfig()` yourself)
@@ -163,8 +163,8 @@ value. For a single change, the `setAndSave*` calls above are simpler.
 | `readFirmwareVersion(String&)` / `readSerialNumber(String&)` | |
 | `setMaxDistanceMeters(float)` / `readMaxDistanceMeters(float&)` | 0.7–10.0m, live only |
 | `setDisappearDelaySec(uint16_t)` / `readDisappearDelaySec(uint16_t&)` | Live only |
-| `setMotionThresholdDb(gate, db)` / `readMotionThresholdDb(gate, db&)` | gate 0–15, live only |
-| `setMicroThresholdDb(gate, db)` / `readMicroThresholdDb(gate, db&)` | gate 0–15, live only |
+| `setTriggerThresholdDb(gate, db)` / `readTriggerThresholdDb(gate, db&)` | gate 0–15, live only |
+| `setMotionlessThresholdDb(gate, db)` / `readMotionlessThresholdDb(gate, db&)` | gate 0–15, live only |
 | `readPowerInterference(uint8_t&)` | 0 not run, 1 clear, 2 interference detected |
 | `startCalibration(trigger, hold, micro)` | Auto-generates thresholds for the room. Factors default 3. |
 | `calibrationProgress(uint8_t&)` | 0–100, poll until 100 |
@@ -304,7 +304,7 @@ say outright, found by testing:
   been verified across a real power cycle: `enableConfig()` → set the value
   → **wait ~200ms** → read it back → set it again → `endConfig()`, **without**
   calling `saveParameters()` at all. See
-  `LD2402::persistGate15MicroThresholdDb()` for the implementation. Hi-Link
+  `LD2402::persistGate15MotionlessThresholdDb()` for the implementation. Hi-Link
   support confirmed this workaround but couldn't explain *why* it's needed —
   their explanation didn't match the documented protocol, so treat this as
   empirically verified rather than fully understood.
