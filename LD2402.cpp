@@ -358,19 +358,19 @@ bool LD2402::readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs) {
 }
 
 bool LD2402::setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    (void)saveTimeoutMs;   // no longer needed -- endConfig() alone commits to flash, see LD2402.h
     enableConfig(configTimeoutMs);
     bool ok = setMaxDistanceMeters(meters);
-    bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
-    return ok && saved;
+    return ok;
 }
 
 bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    (void)saveTimeoutMs;
     enableConfig(configTimeoutMs);
     bool ok = setDisappearDelaySec(seconds);
-    bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
-    return ok && saved;
+    return ok;
 }
 
 bool LD2402::setTriggerThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
@@ -396,53 +396,33 @@ bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeout
     return true;
 }
 
-bool LD2402::persistGate15MotionlessThresholdDb(float db, uint16_t configTimeoutMs) {
-    enableConfig(configTimeoutMs);
-    bool setOk = setMotionlessThresholdDb(15, db);
-    idleDelay(200);   // settle time before reading the same address back -- an
-                  // immediate read consistently failed without this pause
-    float readBack = 0;
-    bool readOk = readMotionlessThresholdDb(15, readBack);
-    bool rewriteOk = setMotionlessThresholdDb(15, readOk ? readBack : db);
-    endConfig(configTimeoutMs);   // deliberately no saveParameters() call --
-                   // that's what Hi-Link's own workaround replaces for this
-                   // one parameter
-    return setOk && readOk && rewriteOk;
-}
-
 bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    (void)saveTimeoutMs;
     if (gate > 15) return false;
     enableConfig(configTimeoutMs);
     bool ok = setTriggerThresholdDb(gate, db);
-    bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
-    return ok && saved;
+    return ok;
 }
 
 bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    (void)saveTimeoutMs;
     if (gate > 15) return false;
-    if (gate == 15) return persistGate15MotionlessThresholdDb(db, configTimeoutMs);   // known quirk, own procedure
     enableConfig(configTimeoutMs);
     bool ok = setMotionlessThresholdDb(gate, db);
-    bool saved = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
-    return ok && saved;
+    return ok;
 }
 
 bool LD2402::saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    (void)saveTimeoutMs;
     enableConfig(configTimeoutMs);
     bool ok = true;
     if (triggerDb) for (uint8_t i = 0; i < 16; i++) ok &= setTriggerThresholdDb(i, triggerDb[i]);
-    // Gate 15's motionless threshold is deliberately excluded here -- it needs its
-    // own separate procedure (persistGate15MotionlessThresholdDb()) regardless of
-    // what else is in this session, and including it would fail the save for
-    // every other value bundled alongside it.
-    if (motionlessDb) for (uint8_t i = 0; i < 15; i++) ok &= setMotionlessThresholdDb(i, motionlessDb[i]);
-    bool saved = saveParameters(saveTimeoutMs);
+    if (motionlessDb) for (uint8_t i = 0; i < 16; i++) ok &= setMotionlessThresholdDb(i, motionlessDb[i]);
     endConfig(configTimeoutMs);
-    if (motionlessDb) ok &= persistGate15MotionlessThresholdDb(motionlessDb[15], configTimeoutMs);
-    return ok && saved;
+    return ok;
 }
 
 bool LD2402::readPowerInterference(uint8_t &status, uint16_t timeoutMs) {

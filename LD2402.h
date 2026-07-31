@@ -64,12 +64,9 @@ public:
     unsigned long lastByteMs() const { return _lastByteMs; }
 
     // Called repeatedly while this driver is blocked waiting on the module --
-    // which is where essentially all of its time goes. Measured on a real
-    // HLK-LD2402: writing all 31 thresholds accounts for only ~0.6s of a ~6.2s
-    // saveAllThresholds(); the remaining ~5.6s is spent waiting for the flash
-    // commit and for config mode to open and close. On a single-threaded board
-    // that is time in which nothing else in your sketch runs, so a display sits
-    // frozen and animations stop.
+    // which is where essentially all of its time goes. On a single-threaded
+    // board that is time in which nothing else in your sketch runs, so a
+    // display sits frozen and animations stop unless this is used.
     //
     // Pass a short function that services whatever mustn't stall. It is called
     // very often, so keep it cheap (an early "has enough time passed?" test is
@@ -99,8 +96,9 @@ public:
     bool setDisappearDelaySec(uint16_t seconds, uint16_t timeoutMs = 1000);
     bool readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs = 1000);
     // Convenience: set + persist in one call, own config session -- same
-    // pattern as the threshold convenience methods below. configTimeoutMs is
-    // passed to enableConfig(), saveTimeoutMs to saveParameters().
+    // pattern as the threshold convenience methods below. Exiting config mode
+    // commits the change to flash by itself, no explicit save needed.
+    // saveTimeoutMs is accepted for API compatibility but unused.
     bool setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
     bool setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
@@ -109,39 +107,25 @@ public:
     bool setMotionlessThresholdDb(uint8_t gate, float db, uint16_t timeoutMs = 1000);    // gate 0-15
     bool readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs = 1000);
 
-    // Gate 15's motionless threshold (parameter 0x003F) doesn't persist via the
-    // normal setMotionlessThresholdDb() + saveParameters() sequence -- confirmed
-    // via direct protocol-level testing (see the Hi-Link support ticket
-    // referenced in LEFTOFF.md). Hi-Link's own support team gave a workaround
-    // that empirically works (verified across a real power cycle), even
-    // though their explanation of *why* doesn't match what's actually
-    // documented: set the value, wait briefly, read it back, set it again,
-    // then exit config mode -- WITHOUT calling the normal save command.
-    // Self-contained: manages its own enableConfig()/endConfig(). The 200ms
-    // settle delay between the write and the read-back is fixed -- it's part
-    // of what makes the workaround reliable, not a tunable timeout.
-    bool persistGate15MotionlessThresholdDb(float db, uint16_t configTimeoutMs = 2500);
-
     // ---- Convenience: set + persist in one call, own config session ----
     // Callers who just want "change this threshold and have it stick" can use
-    // these instead of manually wrapping setXThresholdDb()/saveParameters() in
-    // enableConfig()/endConfig() -- and setAndSaveMotionlessThresholdDb() routes
-    // gate 15 through persistGate15MotionlessThresholdDb() automatically, so
-    // callers don't need to know that quirk exists. configTimeoutMs is passed
-    // to enableConfig(), saveTimeoutMs to saveParameters() (ignored for gate
-    // 15's motionless threshold, which never calls saveParameters() at all).
+    // these instead of manually wrapping setXThresholdDb() in enableConfig()/
+    // endConfig(). Persistence is automatic: exiting config mode commits the
+    // change to flash by itself -- confirmed by direct protocol-level testing
+    // (write every gate 0-15's trigger and motionless threshold plus max
+    // distance and disappear delay, exit config with no save command sent at
+    // all, power-cycle the sensor, read every value back: all 34/34
+    // persisted). No explicit save command is needed for any parameter,
+    // including gate 15's motionless threshold, which an earlier, narrower
+    // test had mistakenly flagged as needing special handling.
+    // saveTimeoutMs is accepted for API compatibility but unused.
     bool setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
     bool setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 3000);
 
-    // Writes all 16 trigger + all 16 motionless thresholds and persists them all in
-    // one efficient session (one enableConfig()/endConfig() pair covers 31 of
-    // the 32 values; gate 15's motionless threshold needs its own separate
-    // procedure regardless, same as the single-gate version above). Pass
-    // nullptr for either array to skip it entirely. saveTimeoutMs defaults
-    // higher than the single-gate version -- up to 31 sequential writes
-    // precede the save, and committing that many changed parameters measurably
-    // takes longer than after a single-gate write. See onIdle() if the several
-    // seconds this takes must not stall the rest of your sketch.
+    // Writes all 16 trigger + all 16 motionless thresholds and persists them
+    // all in one enableConfig()/endConfig() session -- no explicit save
+    // command needed, see above. Pass nullptr for either array to skip it
+    // entirely. saveTimeoutMs is accepted for API compatibility but unused.
     bool saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                             uint16_t configTimeoutMs = 2500, uint16_t saveTimeoutMs = 8000);
 
