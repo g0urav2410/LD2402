@@ -14,6 +14,42 @@ Self-contained: the only dependency is Arduino's `Stream` interface, so it
 works on hardware UART, a second hardware UART (ESP32's `Serial1`/`Serial2`),
 or `SoftwareSerial`.
 
+## Contents
+
+- [Read this first](#read-this-first) — the five things that catch everyone
+- [Why not just use the IO pin?](#why-not-just-use-the-io-pin)
+- [Hardware](#hardware) · [Install](#install) · [Quick start](#quick-start)
+- [Two ways to feed it data](#two-ways-to-feed-it-data)
+- **API reference**
+  - [Live readings](#live-readings-from-whichever-mode-the-sensor-is-streaming)
+  - [Moving vs still: the sensor does not tell you](#moving-vs-still-the-sensor-does-not-tell-you)
+  - [Report mode](#report-mode)
+  - [Settings that persist](#settings-that-need-to-persist--one-call-each)
+  - [Raw configuration](#raw-configuration-all-blocking--wrap-a-batch-in-enableconfigendconfig-yourself)
+  - [Keeping your sketch alive: `onIdle()`](#keeping-the-rest-of-your-sketch-alive-onidle)
+- [What the "gates" are](#what-the-gates-are)
+- **Protocol notes**
+  - [Behaviour that will surprise you](#behaviour-that-will-surprise-you)
+  - [Wire format](#wire-format)
+- [Related](#related) · [License](#license)
+
+## Read this first
+
+Five things about this module that aren't in the manual, cost real debugging
+time to find, and change how you write your code. Each links to the detail.
+
+| # | The trap | What to do |
+|---|---|---|
+| 1 | **The sensor never tells you moving vs still.** The status byte is a presence bit plus an unrelated flag — reading it as an enum gives you three separate bugs at once. | Call `cacheThresholds()` once after `begin()`; the library derives it. [Detail](#moving-vs-still-the-sensor-does-not-tell-you) |
+| 2 | **Leaving config mode does not save anything.** Values set without an explicit save read back fine, then vanish on the next power cycle. | Use the `setAndSave*` calls. [Detail](#behaviour-that-will-surprise-you) |
+| 3 | **Gate 0 is dead code** — the module never evaluates it, so nothing closer than 0.7 m is detectable and no setting changes that. | Design around it. [Detail](#behaviour-that-will-surprise-you) |
+| 4 | **Deep-stillness detection only works between 2.8 m and 4.9 m.** Hard-wired to four gates. Outside that band you get motion only. | Place the sensor accordingly. [Detail](#behaviour-that-will-surprise-you) |
+| 5 | **Output mode is not persistent.** After the module loses power it is back to text mode, and engineering data stops. | Re-send `setEngineeringMode(true)` when the module reappears. [Detail](#behaviour-that-will-surprise-you) |
+
+Also worth knowing before you wire anything: **give the sensor its own UART**
+— sharing one with a debug console breaks it in both directions, and the
+reasons are [not obvious](#two-ways-to-feed-it-data).
+
 ## Why not just use the IO pin?
 
 The sensor also has a plain presence-out pin (HIGH/LOW). If that's all you
@@ -330,12 +366,17 @@ someone actually sits.
 
 ## Protocol notes
 
-Reverse-assembled from the official HLK-LD2402 user manual (v1.08); Hi-Link
-does not publish a separate protocol PDF. A few things the manual doesn't
-say outright, found by testing:
+Things the manual doesn't say outright. Reverse-assembled from the official
+HLK-LD2402 user manual (v1.08) — Hi-Link publishes no separate protocol PDF
+— found by testing, and most of it since confirmed against a full
+disassembly of firmware v3.3.5.
 
-Several of the entries below were later confirmed against a full
-disassembly of firmware v3.3.5 — noted individually where that applies.
+Split three ways on purpose: **behaviour** changes how you write your code
+and is worth reading start to finish; **wire format** is lookup material for
+when a packet capture doesn't match expectations; and there is exactly one
+outright **firmware bug** that needs a workaround.
+
+### Behaviour that will surprise you
 
 - **Exiting config mode does NOT save anything.** Every persisting call in
   this library sends `0x00FD` (`saveParameters()`) before `endConfig()`. An
@@ -371,13 +412,28 @@ disassembly of firmware v3.3.5 — noted individually where that applies.
   thresholds and distances which are in its flash. After a module power
   cycle it returns to text mode and `setEngineeringMode(true)` must be sent
   again.
-- Energy gates: the 128-byte body in an engineering frame is 32×4-byte
-  values — 16 motion gates followed by 16 micro-motion gates, matching the
-  16 threshold IDs of each (`0x0010`–`0x001F` and `0x0030`–`0x003F`).
-- dB conversion both ways: `dB = 10·log10(raw)`, `raw = 10^(dB/10)`.
-- ACK frames echo the command word with `+0x0100` set. Auto-gain's
+### Wire format
+
+Reference material — the library already handles all of it. Useful when
+comparing against a packet capture or writing your own parser.
+
+- **Baud rate 115200, 8N1, fixed.** USART2 on the module's own MCU.
+- **Energy gates:** the 128-byte body in an engineering frame is 32×4-byte
+  little-endian values — 16 motion gates followed by 16 micro-motion gates,
+  matching the 16 threshold IDs of each (`0x0010`–`0x001F` and
+  `0x0030`–`0x003F`).
+- **Thresholds on the wire are linear power, not dB.** `raw = 10^(dB/10)`,
+  and back with `dB = 10·log10(raw)`. Writing the dB number directly gives
+  you a threshold around 15 dB — wildly over-sensitive, and an easy way to
+  end up with a sensor that triggers on everything.
+- **ACK frames echo the command word with `+0x0100` set.** Auto-gain's
   completion report is the one exception — it arrives unprompted, carrying
-  the bare word `0x00F0`, not an ACK to something you sent.
+  the bare word `0x00F0`, not an ACK to anything you sent.
+- **Frame delimiters:** commands `FD FC FB FA … 04 03 02 01`; engineering
+  frames `F4 F3 F2 F1 … F8 F7 F6 F5`.
+
+### One outright firmware bug
+
 - **Gate 15's micro threshold (`0x003F`) doesn't persist via the normal
   set-then-`saveParameters()` sequence** — confirmed on firmware v3.3.5,
   deterministic, 100% reproducible. The write itself succeeds and applies
