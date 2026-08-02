@@ -83,7 +83,7 @@ void LD2402::handleTextLine(String line) {
     line.trim();
     if (line.length() == 0) return;
     if (line == "OFF") {
-        _result = 0;
+        _state = 0;
         _distanceCm = 0;
         _engineering = false;
         _lastUpdateMs = millis();
@@ -91,7 +91,7 @@ void LD2402::handleTextLine(String line) {
     }
     int colon = line.indexOf(':');
     if (line.startsWith("distance") && colon >= 0) {
-        _result = 1;
+        _state = 1;
         _distanceCm = (uint16_t)line.substring(colon + 1).toInt();
         _engineering = false;
         _lastUpdateMs = millis();
@@ -100,7 +100,7 @@ void LD2402::handleTextLine(String line) {
 
 void LD2402::handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
-    _result = body[0];
+    _state = body[0];
     _distanceCm = body[1] | ((uint16_t)body[2] << 8);
     _engineering = true;
     if (len >= 3 + 32 * 4) {
@@ -358,69 +358,85 @@ bool LD2402::readDisappearDelaySec(uint16_t &seconds, uint16_t timeoutMs) {
 }
 
 bool LD2402::setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    (void)saveTimeoutMs;   // no longer needed -- endConfig() alone commits to flash, see LD2402.h
+    // endConfig() does NOT commit to flash. Verified on hardware: values set
+    // through here read back correctly and then revert after the module is
+    // power-cycled. 0x00FD (saveParameters) is the only thing that persists
+    // them, and it merely *requests* the save -- the module's main loop does
+    // the erase and program afterwards -- so it waits before returning
+    // rather than letting endConfig race the write.
     enableConfig(configTimeoutMs);
     bool ok = setMaxDistanceMeters(meters);
+    if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok;
 }
 
 bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    (void)saveTimeoutMs;
     enableConfig(configTimeoutMs);
     bool ok = setDisappearDelaySec(seconds);
+    if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok;
 }
 
 bool LD2402::setTriggerThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
     if (gate > 15) return false;
-    return setParameterRaw(0x0010 + gate, rawFromDb(db), timeoutMs);
+    if (!setParameterRaw(0x0010 + gate, rawFromDb(db), timeoutMs)) return false;
+    _triggerTh[gate] = db;   // mirror into the classifier cache -- see isMoving()
+    return true;
 }
 bool LD2402::readTriggerThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     uint32_t raw;
     if (!readParameterRaw(0x0010 + gate, raw, timeoutMs)) return false;
     db = dbFromRaw(raw);
+    _triggerTh[gate] = db;
+    _trigSeen |= (uint16_t)1u << gate;
+    noteThresholdProgress();
     return true;
 }
 bool LD2402::setMotionlessThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
     if (gate > 15) return false;
-    return setParameterRaw(0x0030 + gate, rawFromDb(db), timeoutMs);
+    if (!setParameterRaw(0x0030 + gate, rawFromDb(db), timeoutMs)) return false;
+    _motionlessTh[gate] = db;
+    return true;
 }
 bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
     if (gate > 15) return false;
     uint32_t raw;
     if (!readParameterRaw(0x0030 + gate, raw, timeoutMs)) return false;
     db = dbFromRaw(raw);
+    _motionlessTh[gate] = db;
+    _motSeen |= (uint16_t)1u << gate;
+    noteThresholdProgress();
     return true;
 }
 
 bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    (void)saveTimeoutMs;
     if (gate > 15) return false;
     enableConfig(configTimeoutMs);
     bool ok = setTriggerThresholdDb(gate, db);
+    if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok;
 }
 
 bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    (void)saveTimeoutMs;
     if (gate > 15) return false;
     enableConfig(configTimeoutMs);
     bool ok = setMotionlessThresholdDb(gate, db);
+    if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
     return ok;
 }
 
 bool LD2402::saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    (void)saveTimeoutMs;
     enableConfig(configTimeoutMs);
     bool ok = true;
     if (triggerDb) for (uint8_t i = 0; i < 16; i++) ok &= setTriggerThresholdDb(i, triggerDb[i]);
     if (motionlessDb) for (uint8_t i = 0; i < 16; i++) ok &= setMotionlessThresholdDb(i, motionlessDb[i]);
+    if (ok) ok = saveParameters(saveTimeoutMs);   // see setAndSaveMaxDistanceMeters
     endConfig(configTimeoutMs);
     return ok;
 }
@@ -467,6 +483,31 @@ bool LD2402::readCalibrationInterference(bool &hadInterference, uint16_t &gateMa
         return true;
     }
     return false;
+}
+
+// Mirrors the module's own peak selection: scan gates 1..15 and take any
+// gate whose motion energy clears that gate's trigger threshold. Gate 0 is
+// skipped for the reason the module skips it -- its threshold is never
+// evaluated, so including it would let near-field clutter set a flag no
+// configuration change could clear.
+bool LD2402::isMoving() const {
+    if (!_engineering || !_thresholdsValid) return presence();
+    for (uint8_t g = 1; g < 16; g++) {
+        const float e = triggerEnergyDb(g);
+        if (!isnan(e) && e > _triggerTh[g]) return true;
+    }
+    return false;
+}
+
+bool LD2402::cacheThresholds(uint16_t configTimeoutMs) {
+    if (!enableConfig(configTimeoutMs)) return false;
+    float db;
+    for (uint8_t g = 0; g < 16; g++) {
+        readTriggerThresholdDb(g, db);
+        readMotionlessThresholdDb(g, db);
+    }
+    endConfig(configTimeoutMs);
+    return _thresholdsValid;
 }
 
 bool LD2402::saveParameters(uint16_t timeoutMs) {

@@ -122,13 +122,57 @@ library's slow configuration calls.
 | Call | Returns |
 |---|---|
 | `read()` | `Reading{presence, moving, still, connected, distanceCm}` — everything below, in one call |
-| `presence()` | `bool` — someone detected (moving or still) |
-| `isMoving()` / `isStill()` | `bool` — which kind of presence |
+| `presence()` | `bool` — someone detected |
+| `isMoving()` / `isStill()` | `bool` — **derived here, not reported by the sensor.** See below |
 | `distanceCm()` | `uint16_t` — distance to the target |
 | `haveEnergyGates()` | `bool` — true once an engineering frame has arrived |
 | `triggerEnergyDb(gate)` / `motionlessEnergyDb(gate)` | `float` dB, gate 0–15, near → far |
 | `connected()` | `bool` — data received in the last 2s |
 | `lastUpdateMs()` | `unsigned long` — `millis()` of the last reading |
+| `cacheThresholds()` | reads all 32 thresholds so `isMoving()` can classify — call once after `begin()` |
+| `haveThresholdCache()` | `bool` — whether that has happened |
+
+#### Moving vs still: the sensor does not tell you
+
+This is the single most important thing to understand about this module, and
+it is not in the manual.
+
+The engineering frame's first byte looks like a status enum. It isn't. It is:
+
+```
+state = presence;                    // 0 or 1
+if (<reporting sub-mode>) state += 0x10;
+```
+
+So the only values that ever appear are **`0x00`, `0x01`, `0x10`, `0x11`** —
+a presence bit, plus a flag about the module's own reporting mode that has
+nothing to do with the room. Read it as "1 = moving, 2 = still" and you get
+three separate bugs: `isStill()` can never be true (2 never arrives), a
+moving target reads as neither whenever the sub-mode flag is set, and `0x10`
+— which means **nobody is present** — is counted as presence because it is
+non-zero.
+
+And the distinction cannot be recovered from that byte, because inside the
+module the motion and micro-motion chains are merged with a plain `OR` into
+one presence bit before the frame is built.
+
+So this library derives it instead, from the per-gate energies against the
+per-gate thresholds — which is what the frame carries two energy arrays for:
+
+```cpp
+radar.cacheThresholds();     // once, after begin()
+...
+radar.isMoving();            // any gate 1-15 over its trigger threshold
+radar.isStill();             // present, but not moving
+```
+
+Without `cacheThresholds()`, `isMoving()` falls back to reporting any
+presence as movement — the safer of the two wrong answers, and no worse than
+what you had before.
+
+Gate 0 is excluded deliberately: the module never evaluates it (see
+[Protocol notes](#protocol-notes)), so including it would let near-field
+clutter set a flag no configuration change could clear.
 
 ### Report mode
 
@@ -142,6 +186,10 @@ library's slow configuration calls.
 These set the value **and** commit it to the sensor's own flash, each managing
 its own config session. This is what you want almost all the time — a value
 set without saving reverts the moment the sensor loses power.
+
+Each of these sends the explicit save command (`0x00FD`) before leaving
+config mode. Exiting config mode alone does **not** persist anything; see
+[Protocol notes](#protocol-notes).
 
 | Call | Sets |
 |---|---|
@@ -286,8 +334,43 @@ Reverse-assembled from the official HLK-LD2402 user manual (v1.08); Hi-Link
 does not publish a separate protocol PDF. A few things the manual doesn't
 say outright, found by testing:
 
+Several of the entries below were later confirmed against a full
+disassembly of firmware v3.3.5 — noted individually where that applies.
+
+- **Exiting config mode does NOT save anything.** Every persisting call in
+  this library sends `0x00FD` (`saveParameters()`) before `endConfig()`. An
+  earlier version relied on `endConfig()` committing by itself; values set
+  that way read back correctly and then reverted after a power cycle.
+  Confirmed in the disassembly: end-config calls two re-apply routines and
+  touches neither flash nor the deferred-save flag, and `0x00FD` only
+  *requests* the save — the module's main loop performs the erase and write
+  afterwards, so a delay before leaving config mode is required.
+- **Gate 0 is dead code.** Both detection loops start at gate 1.
+  `TriggerGate0Threshold` and `MotionlessHoldGate0Threshold` have no effect
+  whatsoever. If detection closer than 0.7m is failing, this is why, and no
+  configuration changes it.
+- **`HoldGateNThreshold` (IDs `0x0020`–`0x002F`) is not implemented.** Those
+  IDs hit a stub returning constant 0 — no storage, no reader. This is why
+  the vendor tool shows them all as `0.00`. Writing them is discarded
+  silently. Only Trigger and Motionless-hold are real.
+- **Deep-stillness detection only covers gates 4–7 (2.8–4.9m).** The
+  long-window tracker that keeps a motionless person detected is hard-wired
+  to those four gates. Outside that band you get motion detection only.
+  Its threshold is also adaptive and not configurable, tracking a slow
+  average of motion energy in the same gate — so persistent motion-band
+  noise there (a fan, a curtain) desensitises still detection.
+- **Calibration progress reads 0% for the first ~14%** of the run — the
+  countdown starts at 31,360 but the percentage is computed against 26,880.
+  Don't treat "still 0%" as stalled.
+- **Moving and still are not mutually exclusive** in the module's own logic.
+  They are one signal under two different filter time constants, so a person
+  who has just stopped walking registers in both.
 - **Engineering data only streams after `endConfig()`** — enabling it while
   still in config mode has no visible effect.
+- **Output mode is not persistent.** It lives in the module's RAM, unlike
+  thresholds and distances which are in its flash. After a module power
+  cycle it returns to text mode and `setEngineeringMode(true)` must be sent
+  again.
 - Energy gates: the 128-byte body in an engineering frame is 32×4-byte
   values — 16 motion gates followed by 16 micro-motion gates, matching the
   16 threshold IDs of each (`0x0010`–`0x001F` and `0x0030`–`0x003F`).
@@ -311,10 +394,17 @@ say outright, found by testing:
 
 ## Related
 
+- [Presently](https://github.com/g0urav2410/Presently) — a standalone
+  presence-sensor product built on this driver: ESP32-C3 firmware with an
+  HTTP API, MQTT/Home Assistant discovery, and a Flutter app with live
+  per-gate tuning. The current reference integration.
 - [Clockwise](https://github.com/g0urav2410/Clockwise) — the smart-clock
-  project this library was built for; see its firmware for a real
-  shared-UART integration, plus an HTTP API and Flutter app built on top of
-  this driver's data.
+  project this library was originally built for. The sensor has since been
+  split out of it into Presently, so the integration there is historical.
+- **Firmware reverse-engineering writeup** — a full disassembly of
+  LD2402 firmware v3.3.5 (signal chain, all 24 commands, the parameter map,
+  calibration and persistence). Most of the protocol notes above trace back
+  to it. Not published; kept alongside this repo.
 
 ## License
 

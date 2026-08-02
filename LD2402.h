@@ -32,9 +32,44 @@ public:
     bool midFrame() const { return _pstate != P_IDLE; }
 
     // ---- Live readings (updated by loop() from whatever is streaming) ----
-    bool presence() const { return _result != 0; }
-    bool isMoving() const { return _result == 1; }
-    bool isStill() const { return _result == 2; }
+    //
+    // A note on what the module actually tells you, because it is not what
+    // the obvious reading of its output suggests.
+    //
+    // The engineering frame's first byte is NOT an enum of none/moving/still.
+    // It is built as:
+    //
+    //     state = presence;                    // 0 or 1
+    //     if (<reporting sub-mode>) state += 0x10;
+    //
+    // so the only values that ever appear on the wire are 0x00, 0x01, 0x10
+    // and 0x11. It never sends 2. This library used to read it as
+    // "1 = moving, 2 = still", which meant isStill() could not return true
+    // under any circumstances, isMoving() went false whenever the sub-mode
+    // flag happened to be set on a moving target, and 0x10 -- which means
+    // NOBODY is present -- was accepted as presence because it is non-zero.
+    //
+    // Worse, the distinction genuinely is not in there to recover: inside
+    // the module the motion and micro-motion chains are merged with a plain
+    // OR into a single presence bit before the frame is built. Masking the
+    // byte differently cannot bring it back.
+    //
+    // So moving/still is derived here instead, from the per-gate energies
+    // against the per-gate thresholds -- which is what the frame carries two
+    // energy arrays for. Call cacheThresholds() once after begin() to enable
+    // it; without that, isMoving() falls back to reporting any presence as
+    // movement, which is the safer of the two wrong answers.
+    bool presence() const { return (_state & 0x0F) != 0; }
+    bool isMoving() const;
+    bool isStill() const { return presence() && !isMoving(); }
+
+    // Reads all 32 thresholds into a local cache so isMoving() can classify.
+    // Enters and leaves config mode itself; call it once at startup and
+    // again after any calibration (which rewrites every threshold). Returns
+    // false if the module refused, in which case classification stays in its
+    // fallback mode.
+    bool cacheThresholds(uint16_t configTimeoutMs = 2500);
+    bool haveThresholdCache() const { return _thresholdsValid; }
     uint16_t distanceCm() const { return _distanceCm; }
     bool haveEnergyGates() const { return _engineering; }
     // gate 0-15, near to far. NAN if no engineering data received yet.
@@ -164,7 +199,21 @@ private:
     uint8_t _body[200];
     String _lineBuf;
 
-    uint8_t _result = 0;       // 0 none, 1 moving, 2 still
+    uint8_t _state = 0;   // raw state byte -- see presence() above
+
+    // Per-gate thresholds mirrored locally so isMoving() can classify without
+    // a UART round trip per frame (which would mean entering config mode
+    // several times a second and stalling the stream). Kept in step by the
+    // read/set threshold calls; only counts as usable once every gate in
+    // both sets has a real value, since comparing live energy against a
+    // half-filled table of zeros would read as permanently over threshold.
+    float _triggerTh[16] = {0};
+    float _motionlessTh[16] = {0};
+    uint16_t _trigSeen = 0, _motSeen = 0;
+    bool _thresholdsValid = false;
+    void noteThresholdProgress() {
+        if (_trigSeen == 0xFFFF && _motSeen == 0xFFFF) _thresholdsValid = true;
+    }
     uint16_t _distanceCm = 0;
     bool _engineering = false;
     uint32_t _energy[32] = {0};
