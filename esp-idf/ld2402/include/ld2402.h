@@ -127,6 +127,11 @@ bool ld2402_read_calibration_interference(bool *had_interference, uint16_t *gate
 
 bool ld2402_save_parameters(uint16_t timeout_ms);   // firmware >= 3.3.2
 
+// Restarts the sensor module itself (not the ESP). It comes back in text
+// mode -- output mode is not persistent -- but the driver's watchdog restores
+// engineering mode and re-primes the threshold cache on its own.
+bool ld2402_reboot(uint16_t timeout_ms);
+
 bool ld2402_start_auto_gain(uint16_t timeout_ms);            // firmware >= 3.3.5
 bool ld2402_auto_gain_done(uint16_t timeout_ms);              // waits for the module's completion push
 

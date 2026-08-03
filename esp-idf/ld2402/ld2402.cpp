@@ -1050,6 +1050,27 @@ bool ld2402_save_parameters(uint16_t timeoutMs) {
     return true;
 }
 
+// Restarts the module (command 0x00EF, confirmed in the v3.3.5 disassembly).
+// It exits config mode on its own, so nothing needs wrapping around it.
+//
+// Everything cached here describes the module that just went away: its
+// thresholds are re-read from flash on boot, and its output mode is not
+// persistent at all, so it comes back in text mode. The watchdog puts
+// engineering mode back within a few seconds; the cache task re-primes the
+// thresholds. Nothing else has to be done by the caller.
+bool ld2402_reboot(uint16_t timeoutMs) {
+    UartSession s;
+    if (!s.held) return false;
+    sendCommand(0x00EF, nullptr, 0);
+    if (!waitAck(0x00EF, timeoutMs)) return false;
+    invalidate_threshold_cache();
+    s_engineering = false;
+    s_state = 0;
+    s_distanceCm = 0;
+    notify("sensor module restart requested");
+    return true;
+}
+
 bool ld2402_start_auto_gain(uint16_t timeoutMs) {
     UartSession s;
     if (!s.held) return false;
