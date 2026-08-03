@@ -44,6 +44,11 @@ typedef struct {
     int pin_tx;                  // ESP TX -> module R
     int pin_rx;                  // ESP RX <- module T
     ld2402_event_cb_t event_cb;  // optional
+    // UART receive buffer, bytes. 0 uses the 1KB default. Raise it if this
+    // board does anything that stalls tasks for long stretches -- a flash
+    // write with the cache disabled halts this driver's task, and only this
+    // buffer stands between that and lost frames (~775 bytes/s streaming).
+    int rx_buf_size;
 } ld2402_config_t;
 
 typedef struct {

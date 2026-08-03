@@ -38,7 +38,15 @@ static uart_port_t UART_PORT = UART_NUM_1;
 static int s_pin_tx = -1, s_pin_rx = -1;
 
 #define UART_BAUD       115200
-#define UART_RX_BUF     1024
+// Default UART receive buffer. Overridable via ld2402_config_t::rx_buf_size,
+// and worth overriding on any board that does long flash writes: those run
+// with the flash cache disabled, halting this driver's task along with
+// everything else running from flash, and whatever the module sends meanwhile
+// has to sit in this buffer until the task runs again. Engineering frames are
+// ~775 bytes/s, so 1KB covers only about 1.3 seconds of stall before frames
+// start being lost and the reading goes stale.
+#define UART_RX_BUF_DEFAULT 1024
+static int s_rx_buf = UART_RX_BUF_DEFAULT;
 
 // A frame's parsed-out reading is considered fresh for this long; past it,
 // `connected` reads false even though the last value is still cached. Same
@@ -635,6 +643,7 @@ esp_err_t ld2402_init(const ld2402_config_t *cfg) {
     s_pin_tx    = cfg->pin_tx;
     s_pin_rx    = cfg->pin_rx;
     s_event_cb  = cfg->event_cb;
+    if (cfg->rx_buf_size > 0) s_rx_buf = cfg->rx_buf_size;
 
     s_reading_lock = xSemaphoreCreateMutex();
     s_uart_mutex = xSemaphoreCreateMutex();
@@ -650,7 +659,7 @@ esp_err_t ld2402_init(const ld2402_config_t *cfg) {
     uc.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
     uc.source_clk = UART_SCLK_DEFAULT;
 
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, UART_RX_BUF, 0, 0, nullptr, 0));
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, s_rx_buf, 0, 0, nullptr, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT, &uc));
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT, s_pin_tx, s_pin_rx,
                                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
