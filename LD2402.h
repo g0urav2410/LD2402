@@ -59,9 +59,22 @@ public:
     // energy arrays for. Call cacheThresholds() once after begin() to enable
     // it; without that, isMoving() falls back to reporting any presence as
     // movement, which is the safer of the two wrong answers.
-    bool presence() const { return (_state & 0x0F) != 0; }
-    bool isMoving() const;
-    bool isStill() const { return presence() && !isMoving(); }
+    // What the room is doing, as one value instead of three booleans you have
+    // to combine yourself. This is the call to prefer.
+    //
+    // The three-boolean shape it replaces could contradict itself: isMoving()
+    // looked only at gate energy and never checked presence, so a stray gate
+    // over threshold with nobody detected produced "moving, but not present,
+    // and not still" -- a state that cannot be true. One value cannot say
+    // three things at once, which is the actual fix, not just nicer syntax.
+    enum Activity : uint8_t { Absent = 0, Moving = 1, Still = 2 };
+    Activity activity() const;
+
+    bool presence() const;
+    // Kept so existing sketches still compile. Both are now derived from
+    // activity(), so they cannot disagree with it or with each other.
+    bool isMoving() const { return activity() == Moving; }
+    bool isStill()  const { return activity() == Still; }
 
     // Reads all 32 thresholds into a local cache so isMoving() can classify.
     // Enters and leaves config mode itself; call it once at startup and
@@ -70,7 +83,13 @@ public:
     // fallback mode.
     bool cacheThresholds(uint16_t configTimeoutMs = 2500);
     bool haveThresholdCache() const { return _thresholdsValid; }
-    uint16_t distanceCm() const { return _distanceCm; }
+    // Throws the cache away, so activity() drops to its safe fallback until
+    // cacheThresholds() runs again. Called automatically by startCalibration()
+    // and startAutoGain(), both of which change what the cached numbers mean.
+    void invalidateThresholdCache();
+    // 0 once the sensor stops reporting -- see presence() in the .cpp for why
+    // stale readings are cleared rather than held.
+    uint16_t distanceCm() const { return connected() ? _distanceCm : 0; }
     bool haveEnergyGates() const { return _engineering; }
     // gate 0-15, near to far. NAN if no engineering data received yet.
     float triggerEnergyDb(uint8_t gate) const;
@@ -81,11 +100,13 @@ public:
     // Everything above, bundled into one call -- for the common case of just
     // wanting the current status without calling four separate getters.
     struct Reading {
+        Activity activity;
         bool presence, moving, still, connected;
         uint16_t distanceCm;
     };
     Reading read() const {
-        return {presence(), isMoving(), isStill(), connected(), distanceCm()};
+        const Activity a = activity();
+        return {a, presence(), a == Moving, a == Still, connected(), distanceCm()};
     }
 
     // ---- Diagnostics: raw byte flow, independent of frame parsing ----
@@ -171,17 +192,35 @@ public:
     bool startCalibration(uint8_t triggerFactor = 3, uint8_t holdFactor = 3, uint8_t microFactor = 3, uint16_t timeoutMs = 1000);
     bool calibrationProgress(uint8_t &percent, uint16_t timeoutMs = 1000); // 100 = done
 
-    // Whether the run that just finished detected human motion in the room
-    // while calibrating (the datasheet requires the room stay clear -- this is
-    // the module's own report of whether that held). Call once calibration
-    // reaches 100%. `gateMask` bit N set means interference was seen at gate N
-    // (~0.7m per gate, near to far). Not waitAck()-based: unlike every other
-    // command here, a non-zero status is a valid *result* (interference
-    // present), not a comms failure, so it can't share waitAck's status-means-
-    // failure handling without losing the gate mask it comes with.
-    bool readCalibrationInterference(bool &hadInterference, uint16_t &gateMask, uint16_t timeoutMs = 1000);
+    // REMOVED -- readCalibrationInterference() never worked.
+    //
+    // It sent command 0x0014 believing that reported whether a human moved
+    // through the room during calibration. A full disassembly of firmware
+    // v3.3.5 shows 0x0014 is a plain ping: it returns two constant 0x0000
+    // bytes and looks at nothing. So the call could only ever answer "no
+    // interference, no gates affected", whatever actually happened -- an
+    // always-clear result that read as a real all-clear.
+    //
+    // There is no replacement, because the module does not appear to expose
+    // this at all. Keeping the room genuinely empty during calibration has to
+    // be the operator's job. (This matters more than it sounds: a calibration
+    // run with someone still in the room measures *them*, and thresholds set
+    // above that leave the sensor detecting nothing.)
 
     bool saveParameters(uint16_t timeoutMs = 1000); // firmware >= 3.3.2
+
+    // Restarts the module (command 0x00EF, confirmed in the v3.3.5
+    // disassembly). It exits config mode on its own, so nothing needs to be
+    // wrapped around this; the module goes quiet for a moment and then starts
+    // streaming again.
+    //
+    // Note that a restart drops it back to text output -- output mode lives in
+    // RAM, not flash -- so call setEngineeringMode(true) again afterwards if
+    // you were using it.
+    //
+    // There is deliberately no factoryReset(): the protocol has no such
+    // command. Restoring defaults means writing the values back yourself.
+    bool reboot(uint16_t timeoutMs = 1000);
 
     bool startAutoGain(uint16_t timeoutMs = 1000);           // firmware >= 3.3.5
     bool autoGainDone(uint16_t timeoutMs = 3000);             // waits for the module's completion push

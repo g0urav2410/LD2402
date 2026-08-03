@@ -78,14 +78,25 @@ calibration (below), since that changes those settings.
 
 | Call | What it gives you |
 |---|---|
+| `radar.activity()` | `LD2402::Absent` / `Moving` / `Still` — **the one to prefer** |
 | `radar.presence()` | `true`/`false` — is anyone there |
-| `radar.isMoving()` | `true`/`false` — are they moving |
-| `radar.isStill()` | `true`/`false` — are they there but not moving |
 | `radar.distanceCm()` | how far away, in centimetres |
 | `radar.connected()` | `true` if the sensor has sent data in the last 2 seconds |
-| `radar.read()` | all four of the above, in one go |
+| `radar.read()` | all of the above, in one go |
+| `radar.isMoving()` / `radar.isStill()` | the old booleans, still here so old sketches compile |
 
-Using `read()` instead of calling each one separately:
+`activity()` gives you one answer instead of three booleans you have to
+combine yourself:
+
+```cpp
+switch (radar.activity()) {
+    case LD2402::Absent: Serial.println("empty room");        break;
+    case LD2402::Moving: Serial.println("someone's moving");   break;
+    case LD2402::Still:  Serial.println("someone's sitting still"); break;
+}
+```
+
+Or grab everything at once:
 
 ```cpp
 LD2402::Reading r = radar.read();
@@ -94,6 +105,12 @@ if (r.presence) {
     Serial.println(r.distanceCm);
 }
 ```
+
+**If the sensor stops responding, everything reads as empty** — `presence()`
+goes false and `distanceCm()` goes 0 once nothing has arrived for 2 seconds.
+That's deliberate: holding the last reading forever means an unplugged sensor
+still insists someone is in the room. Use `connected()` if you need to tell
+"nobody's there" apart from "the sensor is gone".
 
 ## Making it more/less sensitive to distance
 
@@ -215,6 +232,31 @@ radar.startAutoGain();
 radar.autoGainDone();   // waits until the sensor finishes adjusting itself
 ```
 
+### Restarting the sensor
+
+```cpp
+radar.reboot();
+```
+
+Handy when it's got into a strange state. It comes back in plain text mode
+(that setting isn't saved on the sensor), so call `setEngineeringMode(true)`
+again afterwards if you were using it. There's no factory-reset command —
+the sensor doesn't have one — so restoring defaults means writing the values
+back yourself.
+
+### After calibrating or auto-gaining, re-read the thresholds
+
+Both change the sensor's thresholds, which the library keeps a local copy of
+in order to tell moving from still. It drops that copy automatically so it
+can't classify against stale numbers — but that means `activity()` falls back
+to "anyone present counts as moving" until you refresh it:
+
+```cpp
+radar.startCalibration();
+// ...poll calibrationProgress() to 100...
+radar.cacheThresholds();     // moving/still accurate again
+```
+
 ### Getting the sensor's info
 
 ```cpp
@@ -257,6 +299,14 @@ void setup() {
 ```
 
 See `examples/NonBlockingUI` for a working demo of this.
+
+### Using it from more than one task (ESP32 / FreeRTOS)
+
+This library isn't thread-safe. It's built for the Arduino model — one
+`loop()`, one caller. If you're on an ESP32 and want to change settings from
+a web handler while another task runs `radar.loop()`, put your own mutex
+around it, or look at the ESP-IDF version in `esp-idf/` which is built for
+that from the start.
 
 For the full list of every call available, open `LD2402.h` — every function
 is commented with what it does right above it.

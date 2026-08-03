@@ -175,18 +175,33 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
         }
         if (got < 2) return false;
         uint16_t len = lenBuf[0] | ((uint16_t)lenBuf[1] << 8);
-        if (len < 2 || len > maxBody) return false;
+        // A nonsense length means those four "header" bytes were noise that
+        // happened to look like FD FC FB FA, not the start of a real frame.
+        // Resync and keep hunting within the time that's left, rather than
+        // giving up on the whole exchange -- one corrupted byte used to abort
+        // a wait that still had most of its budget remaining, turning a
+        // recoverable glitch into a failed command.
+        if (len < 2 || len > maxBody) { match = 0; continue; }
         uint16_t idx = 0;
         while (idx < len && (uint16_t)(millis() - start) < timeoutMs) {
             if (_serial->available()) body[idx++] = readByteTracked();
             else idleWait();
         }
         if (idx < len) return false;
+        // Check the footer rather than just counting four bytes past the body.
+        // The streaming parser already validates its own footer, for exactly
+        // this reason: an unvalidated one lets noise that produced a plausible
+        // header and length be accepted as a genuine frame.
         uint8_t foot = 0;
+        bool footOk = true;
         while (foot < 4 && (uint16_t)(millis() - start) < timeoutMs) {
-            if (_serial->available()) { readByteTracked(); foot++; }
-            else idleWait();
+            if (_serial->available()) {
+                if (readByteTracked() != CMD_FOOT[foot]) footOk = false;
+                foot++;
+            } else idleWait();
         }
+        if (foot < 4) return false;
+        if (!footOk) { match = 0; continue; }   // garbled -- resync, don't accept
         word = body[0] | ((uint16_t)body[1] << 8);
         bodyLen = len - 2;
         for (uint16_t i = 0; i < bodyLen; i++) body[i] = body[i + 2];
@@ -308,7 +323,11 @@ bool LD2402::setOutputMode(bool engineering, uint16_t timeoutMs) {
 }
 
 bool LD2402::setEngineeringMode(bool on, uint16_t configTimeoutMs) {
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = setOutputMode(on);
     endConfig(configTimeoutMs);   // same timeout as enableConfig() -- a caller
                                    // asking for a fast enable almost certainly
@@ -364,7 +383,11 @@ bool LD2402::setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs,
     // them, and it merely *requests* the save -- the module's main loop does
     // the erase and program afterwards -- so it waits before returning
     // rather than letting endConfig race the write.
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = setMaxDistanceMeters(meters);
     if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
@@ -372,7 +395,11 @@ bool LD2402::setAndSaveMaxDistanceMeters(float meters, uint16_t configTimeoutMs,
 }
 
 bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = setDisappearDelaySec(seconds);
     if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
@@ -414,7 +441,11 @@ bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeout
 
 bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = setTriggerThresholdDb(gate, db);
     if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
@@ -423,7 +454,11 @@ bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t confi
 
 bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = setMotionlessThresholdDb(gate, db);
     if (ok) ok = saveParameters(saveTimeoutMs);
     endConfig(configTimeoutMs);
@@ -432,7 +467,11 @@ bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t co
 
 bool LD2402::saveAllThresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    enableConfig(configTimeoutMs);
+    // Bail out instead of pressing on: with config mode never entered,
+    // every command below waits out its full timeout for an ACK that
+    // cannot come, and endConfig() then burns three more retries. The
+    // result was already correct, just several seconds late.
+    if (!enableConfig(configTimeoutMs)) return false;
     bool ok = true;
     if (triggerDb) for (uint8_t i = 0; i < 16; i++) ok &= setTriggerThresholdDb(i, triggerDb[i]);
     if (motionlessDb) for (uint8_t i = 0; i < 16; i++) ok &= setMotionlessThresholdDb(i, motionlessDb[i]);
@@ -455,7 +494,15 @@ bool LD2402::startCalibration(uint8_t triggerFactor, uint8_t holdFactor, uint8_t
         (uint8_t)hold, (uint8_t)(hold >> 8),
         (uint8_t)micro, (uint8_t)(micro >> 8)};
     sendCommand(0x0009, val, 6);
-    return waitAck(0x0009, timeoutMs);
+    if (!waitAck(0x0009, timeoutMs)) return false;
+    // Calibration rewrites all 32 thresholds inside the module, which makes
+    // every cached copy here wrong. Nothing used to invalidate them, so
+    // activity() went on comparing fresh energies against pre-calibration
+    // thresholds indefinitely -- silently, and with no way for a caller to
+    // notice. Dropping the cache costs a re-read and is obviously correct;
+    // the alternative was a classifier quietly running on stale numbers.
+    invalidateThresholdCache();
+    return true;
 }
 
 bool LD2402::calibrationProgress(uint8_t &percent, uint16_t timeoutMs) {
@@ -467,40 +514,52 @@ bool LD2402::calibrationProgress(uint8_t &percent, uint16_t timeoutMs) {
     return true;
 }
 
-bool LD2402::readCalibrationInterference(bool &hadInterference, uint16_t &gateMask, uint16_t timeoutMs) {
-    sendCommand(0x0014, nullptr, 0);
-    const uint16_t wantWord = 0x0014 + 0x0100;
-    unsigned long start = millis();
-    while ((uint16_t)(millis() - start) < timeoutMs) {
-        uint16_t gotWord, bodyLen;
-        uint16_t remaining = timeoutMs - (uint16_t)(millis() - start);
-        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return false;
-        if (gotWord != wantWord) continue; // stray frame, keep waiting
-        if (bodyLen < 4) return false;
-        uint16_t status = _body[0] | ((uint16_t)_body[1] << 8);
-        gateMask = _body[2] | ((uint16_t)_body[3] << 8);
-        hadInterference = (status != 0);
-        return true;
-    }
-    return false;
+// Presence comes from the module's own detection chain, which is the
+// authoritative answer to "is anyone there" -- but it is only meaningful
+// while the module is still talking to us. Held readings are worse than no
+// readings here: unplug the sensor mid-run and the obvious sketch,
+// `if (radar.presence())`, would go on believing someone is in the room
+// forever, with nothing on screen to suggest otherwise.
+bool LD2402::presence() const {
+    return connected() && (_state & 0x0F) != 0;
 }
 
-// Mirrors the module's own peak selection: scan gates 1..15 and take any
-// gate whose motion energy clears that gate's trigger threshold. Gate 0 is
-// skipped for the reason the module skips it -- its threshold is never
-// evaluated, so including it would let near-field clutter set a flag no
-// configuration change could clear.
-bool LD2402::isMoving() const {
-    if (!_engineering || !_thresholdsValid) return presence();
+// One decision, made once, so the three answers cannot disagree.
+//
+// Absent is decided first and absolutely: with nobody detected, "moving" is
+// not a question worth asking. Only then do the gate energies pick between
+// Moving and Still -- mirroring the module's own peak selection, scanning
+// gates 1..15 for any whose motion energy clears that gate's trigger
+// threshold. Gate 0 is skipped for the reason the module skips it: its
+// threshold is never evaluated, so including it would let near-field clutter
+// set a flag no configuration change could clear.
+//
+// Without a threshold cache there is nothing to compare against, so anyone
+// present is reported as Moving -- the safer of the two wrong answers, since
+// a missed still-person is a sensor that looks broken while a missed movement
+// is merely a sensor that looks insensitive.
+LD2402::Activity LD2402::activity() const {
+    if (!presence()) return Absent;
+    if (!_engineering || !_thresholdsValid) return Moving;
     for (uint8_t g = 1; g < 16; g++) {
         const float e = triggerEnergyDb(g);
-        if (!isnan(e) && e > _triggerTh[g]) return true;
+        if (!isnan(e) && e > _triggerTh[g]) return Moving;
     }
-    return false;
+    return Still;
+}
+
+void LD2402::invalidateThresholdCache() {
+    _thresholdsValid = false;
+    _trigSeen = 0;
+    _motSeen = 0;
 }
 
 bool LD2402::cacheThresholds(uint16_t configTimeoutMs) {
     if (!enableConfig(configTimeoutMs)) return false;
+    // Start from nothing rather than topping up whatever is already there. A
+    // refresh after calibration must not be able to leave a mix of new and
+    // stale values behind if some of the 32 reads fail partway through.
+    invalidateThresholdCache();
     float db;
     for (uint8_t g = 0; g < 16; g++) {
         readTriggerThresholdDb(g, db);
@@ -519,7 +578,25 @@ bool LD2402::saveParameters(uint16_t timeoutMs) {
 
 bool LD2402::startAutoGain(uint16_t timeoutMs) {
     sendCommand(0x00EE, nullptr, 0);
-    return waitAck(0x00EE, timeoutMs);
+    if (!waitAck(0x00EE, timeoutMs)) return false;
+    // Auto-gain changes the front-end gain, so every energy number the module
+    // reports afterwards sits on a different scale than the cached thresholds
+    // were read against. Same stale-comparison problem as calibration.
+    invalidateThresholdCache();
+    return true;
+}
+
+bool LD2402::reboot(uint16_t timeoutMs) {
+    sendCommand(0x00EF, nullptr, 0);
+    if (!waitAck(0x00EF, timeoutMs)) return false;
+    // Everything cached here described the module that just went away: its
+    // thresholds are re-read from flash on boot, and its output mode is not
+    // persistent at all, so it comes back in text mode with no energy gates.
+    invalidateThresholdCache();
+    _engineering = false;
+    _state = 0;
+    _distanceCm = 0;
+    return true;
 }
 
 bool LD2402::autoGainDone(uint16_t timeoutMs) {

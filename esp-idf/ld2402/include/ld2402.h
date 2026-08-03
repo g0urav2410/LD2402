@@ -1,0 +1,138 @@
+#pragma once
+#include <stdbool.h>
+#include <stdint.h>
+#include "esp_err.h"
+#include "driver/uart.h"
+
+// Driver for the Hi-Link HLK-LD2402 24GHz presence radar, ported from the
+// standalone Arduino driver (github.com/g0urav2410/LD2402) to ESP-IDF/FreeRTOS.
+//
+// The protocol, the frame layout, the gate math and every quirk/workaround
+// comment below are carried over unchanged from that driver -- they describe
+// the sensor's actual firmware behaviour, not anything specific to Arduino or
+// ESP-IDF. What changed is the concurrency model, and it's a genuine
+// simplification, not a like-for-like port:
+//
+// On the ESP8266, this same UART also had to serve a debug console and share
+// CPU time with everything else in one loop(), so the original driver carried
+// an onIdle() callback threaded through every blocking wait, purely so a
+// multi-second config exchange didn't freeze the display. Here the radar has
+// a task of its own with sole ownership of UART0 (freed up by the console
+// living on native USB instead -- see ../HARDWARE.md). A task is simply
+// *allowed* to block. onIdle() and the byte-by-byte cooperative polling it
+// existed for are gone; blocking config calls just block.
+//
+// What still needs enforcing, and is enforced by a mutex rather than a
+// polling flag: only one thing may be mid-exchange on the UART at a time.
+// ld2402_task()'s own streaming read loop and every config/*() call below
+// content for the same mutex, so a config call from another task cleanly
+// pauses the streaming parse for its duration rather than racing it.
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Notification hook for things the sensor does on its own -- going silent,
+// coming back, having its engineering mode restored after it rebooted itself.
+// Optional; leave it null and these are only ESP_LOG lines. The string is
+// valid only for the duration of the call.
+typedef void (*ld2402_event_cb_t)(const char *message);
+
+// Where the module is wired, supplied at init rather than compiled in.
+typedef struct {
+    uart_port_t uart_port;
+    int pin_tx;                  // ESP TX -> module R
+    int pin_rx;                  // ESP RX <- module T
+    ld2402_event_cb_t event_cb;  // optional
+} ld2402_config_t;
+
+typedef struct {
+    bool presence;         // any detection, moving or still
+    bool moving;
+    bool still;
+    bool connected;        // a frame has arrived recently (see radar.cpp)
+    uint16_t distance_cm;
+    bool engineering;      // true once a binary engineering frame has parsed
+    float trigger_db[16];   // gate 0-15, near to far; NAN until engineering data arrives
+    float motionless_db[16];
+    uint32_t bytes_received;   // diagnostic: total bytes seen, garbage included
+    int64_t last_byte_us;      // esp_timer_get_time() of the last byte, any kind
+    int64_t last_update_us;    // esp_timer_get_time() of the last successfully parsed reading
+} ld2402_reading_t;
+
+// Installs the UART0 driver on the pins in pins.h and starts the task that
+// keeps `ld2402_reading_t` current. Call once.
+esp_err_t ld2402_init(const ld2402_config_t *cfg);
+
+// Thread-safe snapshot of the current reading. Cheap, never blocks on the
+// sensor -- reads a cached struct under a short mutex hold.
+void ld2402_get_reading(ld2402_reading_t *out);
+
+// ---- Config / calibration ----
+// All of these are blocking (they wait for the module's ACK, up to
+// timeout_ms) and contend for the UART mutex with the streaming reader, so
+// they pause live readings for their duration. Meant to be called rarely --
+// from an HTTP handler off a settings screen, not from any hot path. Safe to
+// call from any task; do not call from ld2402_task itself.
+
+bool ld2402_enable_config(uint16_t timeout_ms);
+bool ld2402_end_config(uint16_t timeout_ms);
+
+// buf/cap: caller-owned buffer, no String -- matches the rest of this port.
+bool ld2402_read_firmware_version(char *buf, size_t cap, uint16_t timeout_ms);
+bool ld2402_read_serial_number(char *buf, size_t cap, uint16_t timeout_ms);
+
+// true = binary engineering frames (presence+distance+32 energy gates)
+// false = plain text "OFF" / "distance : NN" (factory default)
+bool ld2402_set_output_mode(bool engineering, uint16_t timeout_ms);
+// Convenience: own enableConfig()/endConfig() session.
+bool ld2402_set_engineering_mode(bool on, uint16_t config_timeout_ms);
+
+bool ld2402_set_max_distance_m(float meters, uint16_t timeout_ms);          // 0.7-10.0m
+bool ld2402_read_max_distance_m(float *meters, uint16_t timeout_ms);
+bool ld2402_set_disappear_delay_s(uint16_t seconds, uint16_t timeout_ms);
+bool ld2402_read_disappear_delay_s(uint16_t *seconds, uint16_t timeout_ms);
+// Convenience: set + persist, own config session.
+bool ld2402_set_and_save_max_distance_m(float meters, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
+bool ld2402_set_and_save_disappear_delay_s(uint16_t seconds, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
+
+bool ld2402_set_trigger_threshold_db(uint8_t gate, float db, uint16_t timeout_ms);   // gate 0-15
+bool ld2402_read_trigger_threshold_db(uint8_t gate, float *db, uint16_t timeout_ms);
+bool ld2402_set_motionless_threshold_db(uint8_t gate, float db, uint16_t timeout_ms);    // gate 0-15
+bool ld2402_read_motionless_threshold_db(uint8_t gate, float *db, uint16_t timeout_ms);
+
+// Convenience: set + persist in one call, own config session. Exiting config
+// mode commits every parameter to flash by itself -- confirmed via direct
+// protocol testing (all 34 writable parameters, including gate 15's
+// motionless threshold, survive a real power cycle with no explicit save
+// command ever sent). save_timeout_ms is accepted for API compatibility but
+// unused.
+bool ld2402_set_and_save_trigger_threshold_db(uint8_t gate, float db, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
+bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
+
+// Writes all 16 motion + all 16 motionless thresholds and persists them in one
+// session (gate 15's motionless threshold still needs its own procedure regardless
+// -- see above). Pass NULL for either array to skip it.
+bool ld2402_save_all_thresholds(const float trigger_db[16], const float motionless_db[16],
+                                uint16_t config_timeout_ms, uint16_t save_timeout_ms);
+
+bool ld2402_read_power_interference(uint8_t *status, uint16_t timeout_ms);   // 0 not run, 1 clear, 2 interference
+
+// Auto threshold calibration. factor 1-20ish (module multiplies by 10 internally).
+bool ld2402_start_calibration(uint8_t trigger_factor, uint8_t hold_factor, uint8_t micro_factor, uint16_t timeout_ms);
+bool ld2402_calibration_progress(uint8_t *percent, uint16_t timeout_ms);   // 100 = done
+// gate_mask bit N set = interference seen at gate N (~0.7m per gate). Call once
+// calibration reaches 100%.
+bool ld2402_read_calibration_interference(bool *had_interference, uint16_t *gate_mask, uint16_t timeout_ms);
+
+bool ld2402_save_parameters(uint16_t timeout_ms);   // firmware >= 3.3.2
+
+bool ld2402_start_auto_gain(uint16_t timeout_ms);            // firmware >= 3.3.5
+bool ld2402_auto_gain_done(uint16_t timeout_ms);              // waits for the module's completion push
+
+bool ld2402_read_parameter_raw(uint16_t id, uint32_t *value, uint16_t timeout_ms);
+bool ld2402_set_parameter_raw(uint16_t id, uint32_t value, uint16_t timeout_ms);
+
+#ifdef __cplusplus
+}
+#endif
