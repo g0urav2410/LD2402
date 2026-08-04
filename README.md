@@ -331,6 +331,10 @@ Calls are `ld2402_*` versions of the same things — `ld2402_get_reading()`,
 
 - **`ld2402_reboot()`** restarts the module itself. Handy when it wedges;
   engineering mode and the threshold cache come back on their own.
+- **`reading.activity`** is `LD2402_ABSENT` / `MOVING` / `STILL` — the same
+  single answer as the Arduino side's `activity()`. `presence`, `moving` and
+  `still` are still in the struct (Home Assistant wants them as separate
+  entities), but all four are decided in one place, so they cannot disagree.
 - **`ld2402_get_cached_*()`** return the driver's own copies of the
   thresholds, max range and disappear delay without touching the UART. The
   slow reads cost a config-mode session and a round trip per value — 32 of
@@ -338,6 +342,38 @@ Calls are `ld2402_*` versions of the same things — `ld2402_get_reading()`,
   seconds of everything else being unanswerable. The cache is exact, not an
   approximation: the moving/still classifier compares live energy against it
   on every frame.
+
+### Config calls while the module is busy
+
+`ld2402_enable_config()` — which every read and write goes through — knows
+when the module is unavailable, and treats two cases differently:
+
+- **An operation is still running** (calibration, auto-gain): returns `false`
+  straight away. Calibration takes about a minute, and blocking a caller that
+  long is worse than telling it the module is busy.
+- **One has just finished**: waits, up to 6 seconds. The module stays
+  unresponsive for a few seconds afterwards, and a write issued in that gap
+  gets no ACK and looks like a failure — which is exactly how a settings
+  restore run straight after a calibration used to fail.
+
+So a caller does not need to know about any of this; it either succeeds or is
+told the module is busy.
+
+### What the event callback reports
+
+If you set `event_cb`, expect these:
+
+| Message | Means |
+|---|---|
+| `sensor module connected` | first frames seen after start-up |
+| `sensor paused for calibration` / `...gain adjustment` | it stopped streaming because you asked it to |
+| `sensor resumed after ...` | streaming again after one of those |
+| `sensor module stopped responding` | silence nobody asked for — **this is the one worth investigating** |
+| `sensor module back after Ns silent` | recovered from that |
+| `engineering mode restored after module restart` | the module rebooted itself and the watchdog put it back |
+
+The paused/resumed pair exists so a routine tune doesn't read as a fault. They
+are deliberately worded differently from the unexplained ones.
 
 Set `rx_buf_size` generously if the host writes flash while running. Those
 writes run with the flash cache disabled, which halts the driver's task along
