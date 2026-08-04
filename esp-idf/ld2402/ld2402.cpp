@@ -117,6 +117,7 @@ void ld2402_get_reading(ld2402_reading_t *out) {
         out->presence = false;
         out->moving = false;
         out->still = false;
+        out->activity = LD2402_ABSENT;
         out->distance_cm = 0;
     }
 }
@@ -432,6 +433,10 @@ static void publishReading() {
     // at by accident. Deriving it makes every state well-defined: something
     // is there, and it is either moving or it isn't.
     r.still = r.presence && !r.moving;
+    // One value carrying the same decision, so callers that want a single
+    // answer do not have to recombine the booleans and risk inventing a
+    // fourth state that cannot occur.
+    r.activity = !r.presence ? LD2402_ABSENT : (r.moving ? LD2402_MOVING : LD2402_STILL);
     r.bytes_received = s_byteCount;
     r.last_byte_us = s_lastByteUs;
     r.last_update_us = s_lastUpdateUs;

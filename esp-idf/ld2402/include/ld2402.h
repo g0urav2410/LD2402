@@ -32,6 +32,14 @@
 extern "C" {
 #endif
 
+// What the room is doing, as one value. Matches the Arduino driver's
+// LD2402::Activity so both drivers describe the sensor the same way.
+typedef enum {
+    LD2402_ABSENT = 0,
+    LD2402_MOVING = 1,
+    LD2402_STILL  = 2,
+} ld2402_activity_t;
+
 // Notification hook for things the sensor does on its own -- going silent,
 // coming back, having its engineering mode restored after it rebooted itself.
 // Optional; leave it null and these are only ESP_LOG lines. The string is
@@ -55,6 +63,13 @@ typedef struct {
     bool presence;         // any detection, moving or still
     bool moving;
     bool still;
+    // The same answer as the three booleans above, as one value. Prefer it:
+    // three booleans describing one thing can be read in combinations that
+    // cannot happen, and callers end up re-deriving the rules. These are kept
+    // because the HTTP API, MQTT discovery and the app all publish them
+    // individually, but they are all decided in one place -- see the note in
+    // ld2402.cpp -- so they cannot disagree with this or with each other.
+    ld2402_activity_t activity;
     bool connected;        // a frame has arrived recently (see radar.cpp)
     uint16_t distance_cm;
     bool engineering;      // true once a binary engineering frame has parsed
