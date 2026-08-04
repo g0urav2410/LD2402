@@ -345,6 +345,10 @@ static volatile bool s_autogain_running = false;
 // room without being long enough to hide a real fault.
 static volatile int64_t s_quiet_until_us = 0;
 
+// What the module is busy with, in words a user would recognise. Null when
+// nothing has claimed it.
+static const char *s_quiet_reason = nullptr;
+
 static void expect_quiet_for(int64_t seconds) {
     s_quiet_until_us = esp_timer_get_time() + seconds * 1000000LL;
 }
@@ -594,6 +598,9 @@ static void engineering_watchdog_task(void *arg) {
     (void)arg;
     bool was_connected = false;
     bool first_pass = true;
+    // Whether the current silence is one we asked for, so the return can be
+    // reported as a resume rather than a recovery.
+    bool paused_deliberately = false;
     int64_t down_since_us = 0;
 
     while (true) {
@@ -604,28 +611,39 @@ static void engineering_watchdog_task(void *arg) {
 
         // ── module presence on the UART ──
         //
-        // Silence we asked for is not silence worth reporting. Auto-gain and
-        // calibration both stop the module streaming while they run -- long
-        // enough to trip the 2s freshness window -- so without this, every
-        // routine tune left "sensor module stopped responding ... back after
-        // 5s silent" in the log. That reads as a fault, and sends whoever
-        // finds it later hunting for one.
+        // Calibration and auto-gain both stop the module streaming for longer
+        // than the 2s freshness window, so without help this reported "sensor
+        // module stopped responding ... back after 5s silent" after every
+        // routine tune -- describing a fault that had not happened, in the
+        // same words as the real dropouts this exists to catch.
         //
-        // The state is still tracked, so a genuine dropout that happens to
-        // start during an operation is still noticed once it ends.
+        // Saying nothing at all would be worse in a different way: the sensor
+        // genuinely does stop reporting for a few seconds, and a log that
+        // skips it leaves an unexplained gap. So it says which it is.
         const bool expected_quiet = s_calibrating || s_autogain_running ||
                                     esp_timer_get_time() < s_quiet_until_us;
-        if (r.connected != was_connected && !expected_quiet) {
-            if (r.connected) {
-                if (first_pass) {
+
+        if (r.connected != was_connected) {
+            if (!r.connected) {
+                down_since_us = esp_timer_get_time();
+                if (expected_quiet && s_quiet_reason) {
+                    notify("sensor paused for %s", s_quiet_reason);
+                    paused_deliberately = true;
+                } else {
+                    notify("sensor module stopped responding");
+                    paused_deliberately = false;
+                }
+            } else {
+                if (paused_deliberately) {
+                    notify("sensor resumed after %s",
+                           s_quiet_reason ? s_quiet_reason : "pause");
+                    paused_deliberately = false;
+                } else if (first_pass) {
                     notify("sensor module connected");
                 } else {
                     notify("sensor module back after %llds silent",
-                                       (esp_timer_get_time() - down_since_us) / 1000000);
+                           (esp_timer_get_time() - down_since_us) / 1000000);
                 }
-            } else {
-                down_since_us = esp_timer_get_time();
-                notify("sensor module stopped responding");
             }
             was_connected = r.connected;
             first_pass = false;
@@ -1107,6 +1125,7 @@ bool ld2402_start_calibration(uint8_t triggerFactor, uint8_t holdFactor, uint8_t
     // and left the no-op guards on the write paths comparing against values
     // the module no longer holds -- silently skipping real writes.
     invalidate_threshold_cache();
+    s_quiet_reason = "calibration";
     s_calibrating = true;
     return true;
 }
@@ -1186,6 +1205,7 @@ bool ld2402_start_auto_gain(uint16_t timeoutMs) {
     if (!s.held) return false;
     sendCommand(0x00EE, nullptr, 0);
     if (!waitAck(0x00EE, timeoutMs)) return false;
+    s_quiet_reason = "gain adjustment";
     s_autogain_running = true;
     // Auto-gain changes the front-end gain, so the energies the module
     // reports afterwards sit on a different scale than the cached thresholds
