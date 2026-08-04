@@ -95,6 +95,12 @@ esp_err_t ld2402_init(const ld2402_config_t *cfg);
 // false means the value has not been read from the module yet -- do the slow
 // read once, and these are populated as a side effect.
 bool ld2402_get_cached_thresholds(float trigger_db[16], float motionless_db[16]);
+
+// How far through a bulk threshold write the driver is, for a caller wanting
+// to show progress. ld2402_save_all_thresholds() is a single call taking ten
+// seconds or so, so without this the only honest options are a spinner or a
+// bar that jumps 0 to 100. Safe to call from another task while the write runs.
+void ld2402_bulk_write_progress(int *done, int *total);
 bool ld2402_get_cached_max_distance_m(float *meters);
 bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
 

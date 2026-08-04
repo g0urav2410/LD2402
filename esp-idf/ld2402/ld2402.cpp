@@ -363,6 +363,12 @@ static const char *s_quiet_reason = nullptr;
 // does not stream while config mode is held, which is expected silence.
 static volatile bool s_in_config = false;
 
+// How far through a bulk threshold write we are. Exposed because the write is
+// a single driver call taking ten seconds or so, and a caller showing a
+// progress bar cannot see inside it otherwise -- 0 then 100 is not progress.
+static volatile int s_bulk_done = 0;
+static volatile int s_bulk_total = 0;
+
 // The stream will be interrupted; don't report it as a fault.
 static void expect_stream_gap_for(int64_t seconds) {
     s_quiet_log_until_us = esp_timer_get_time() + seconds * 1000000LL;
@@ -1126,8 +1132,18 @@ bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_
 // costs a float comparison per gate. The cache is only trusted once every
 // gate has been read back at least once; before that, write everything,
 // because "unknown" must never be mistaken for "unchanged".
+void ld2402_bulk_write_progress(int *done, int *total) {
+    if (done) *done = s_bulk_done;
+    if (total) *total = s_bulk_total;
+}
+
 bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    // Counted before anything is skipped, so the total matches what the caller
+    // asked for rather than what turned out to need writing -- a bar that
+    // shrinks its own scale mid-run is worse than no bar.
+    s_bulk_total = (triggerDb ? 16 : 0) + (motionlessDb ? 16 : 0);
+    s_bulk_done = 0;
     // Bail if config mode was refused. Ignoring this meant the commands
     // below were sent to a module that was not listening: every one of
     // them failed, and a restore of all 32 thresholds reported "sensor
@@ -1144,6 +1160,7 @@ bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionles
 
     if (triggerDb) {
         for (uint8_t i = 0; i < 16; i++) {
+            s_bulk_done++;
             if (s_thresholds_valid && same(triggerDb[i], s_trigger_th[i])) continue;
             ok &= ld2402_set_trigger_threshold_db(i, triggerDb[i], 1000);
             written++;
@@ -1151,6 +1168,7 @@ bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionles
     }
     if (motionlessDb) {
         for (uint8_t i = 0; i < 16; i++) {
+            s_bulk_done++;
             if (s_thresholds_valid && same(motionlessDb[i], s_motionless_th[i])) continue;
             ok &= ld2402_set_motionless_threshold_db(i, motionlessDb[i], 1000);
             written++;
