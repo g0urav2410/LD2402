@@ -331,6 +331,11 @@ static void invalidate_threshold_cache(void) {
 // while the module is busy measuring the room.
 static volatile bool s_calibrating = false;
 
+// Set for the duration of an auto-gain run. Same purpose as s_calibrating:
+// the module goes quiet while it recalibrates its front-end, and that is
+// expected rather than a fault.
+static volatile bool s_autogain_running = false;
+
 // Cached copies of what the module holds, readable without touching the UART.
 //
 // Every read below otherwise costs a config-mode session and a round trip per
@@ -585,7 +590,18 @@ static void engineering_watchdog_task(void *arg) {
         ld2402_get_reading(&r);
 
         // ── module presence on the UART ──
-        if (r.connected != was_connected) {
+        //
+        // Silence we asked for is not silence worth reporting. Auto-gain and
+        // calibration both stop the module streaming while they run -- long
+        // enough to trip the 2s freshness window -- so without this, every
+        // routine tune left "sensor module stopped responding ... back after
+        // 5s silent" in the log. That reads as a fault, and sends whoever
+        // finds it later hunting for one.
+        //
+        // The state is still tracked, so a genuine dropout that happens to
+        // start during an operation is still noticed once it ends.
+        const bool expected_quiet = s_calibrating || s_autogain_running;
+        if (r.connected != was_connected && !expected_quiet) {
             if (r.connected) {
                 if (first_pass) {
                     notify("sensor module connected");
@@ -1122,6 +1138,7 @@ bool ld2402_start_auto_gain(uint16_t timeoutMs) {
     if (!s.held) return false;
     sendCommand(0x00EE, nullptr, 0);
     if (!waitAck(0x00EE, timeoutMs)) return false;
+    s_autogain_running = true;
     // Auto-gain changes the front-end gain, so the energies the module
     // reports afterwards sit on a different scale than the cached thresholds
     // were read against. Same stale-comparison problem as calibration.
@@ -1134,5 +1151,7 @@ bool ld2402_auto_gain_done(uint16_t timeoutMs) {
     if (!s.held) return false;
     // The module pushes this unprompted (word 0x00F0, not a +0x0100 ACK) once
     // auto-gain finishes -- not a reply to a request we send.
-    return waitEvent(0x00F0, timeoutMs);
+    const bool done = waitEvent(0x00F0, timeoutMs);
+    s_autogain_running = false;
+    return done;
 }
