@@ -758,6 +758,37 @@ struct UartSession {
 };
 
 bool ld2402_enable_config(uint16_t timeoutMs) {
+    // Wait out a known-quiet stretch before even trying.
+    //
+    // Calibration and auto-gain leave the module unresponsive for a few
+    // seconds after they finish. A write issued in that window gets no ACK
+    // and is reported as a failure -- which is exactly what happened to a
+    // backup restored straight after a calibration run: "thresholds save
+    // FAILED (sensor did not ack)", with the module perfectly healthy and
+    // simply not listening yet.
+    //
+    // Deliberately before the session mutex is taken, not after. Waiting
+    // while holding it would block the very operation whose quiet period we
+    // are waiting on from ever finishing.
+    //
+    // Two cases, treated differently on purpose:
+    //
+    //   still running  -> refuse immediately. Calibration takes a minute, and
+    //                     blocking a web request for that long is the problem
+    //                     this driver spent a lot of effort removing. "Busy"
+    //                     is a truthful answer the caller can act on.
+    //   just finished  -> wait, but briefly. The gap is a few seconds and the
+    //                     caller almost certainly wants the write to land
+    //                     rather than to be told to try again.
+    if (s_calibrating || s_autogain_running) return false;
+
+    const int64_t wait_until =
+        (s_quiet_until_us < esp_timer_get_time() + 6000000LL) ? s_quiet_until_us
+                                                              : esp_timer_get_time() + 6000000LL;
+    while (esp_timer_get_time() < wait_until && !s_calibrating && !s_autogain_running) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
     // Session lock taken here, released by ld2402_end_config() -- see the
     // s_session_mutex comment above. If the handshake below never succeeds,
     // release it before returning; nothing will call end_config to do it for
