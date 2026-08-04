@@ -305,8 +305,44 @@ See `examples/NonBlockingUI` for a working demo of this.
 This library isn't thread-safe. It's built for the Arduino model — one
 `loop()`, one caller. If you're on an ESP32 and want to change settings from
 a web handler while another task runs `radar.loop()`, put your own mutex
-around it, or look at the ESP-IDF version in `esp-idf/` which is built for
-that from the start.
+around it — or use the ESP-IDF version, below, which is built for that.
+
+## The ESP-IDF version
+
+`esp-idf/ld2402/` is the same driver as an ESP-IDF component: same protocol,
+same quirks, same comments, but with its own task and mutexes instead of the
+Arduino `loop()`/`onIdle()` model. Blocking config calls simply block, because
+a task is allowed to.
+
+Point `EXTRA_COMPONENT_DIRS` at `esp-idf/`, then:
+
+```c
+ld2402_config_t cfg = {};
+cfg.uart_port = UART_NUM_1;
+cfg.pin_tx = 21;          // ESP TX -> module R
+cfg.pin_rx = 20;          // ESP RX <- module T
+cfg.rx_buf_size = 8192;   // 0 = 1KB default; raise it if your board does long flash writes
+cfg.event_cb = my_logger; // optional: module went quiet, came back, mode restored
+ld2402_init(&cfg);
+```
+
+Calls are `ld2402_*` versions of the same things — `ld2402_get_reading()`,
+`ld2402_set_and_save_max_distance_m()`, and so on. Two additions worth knowing:
+
+- **`ld2402_reboot()`** restarts the module itself. Handy when it wedges;
+  engineering mode and the threshold cache come back on their own.
+- **`ld2402_get_cached_*()`** return the driver's own copies of the
+  thresholds, max range and disappear delay without touching the UART. The
+  slow reads cost a config-mode session and a round trip per value — 32 of
+  them for the full threshold set — which on a device serving a web UI is
+  seconds of everything else being unanswerable. The cache is exact, not an
+  approximation: the moving/still classifier compares live energy against it
+  on every frame.
+
+Set `rx_buf_size` generously if the host writes flash while running. Those
+writes run with the flash cache disabled, which halts the driver's task along
+with everything else, and whatever the module sends meanwhile has to sit in
+that buffer — about 775 bytes/s, so 1KB covers only ~1.3 seconds.
 
 For the full list of every call available, open `LD2402.h` — every function
 is commented with what it does right above it.
