@@ -906,7 +906,12 @@ bool ld2402_set_engineering_mode(bool on, uint16_t configTimeoutMs) {
     // Deliberately not wrapped in its own UartSession -- enable/set/end below
     // each take and release the mutex themselves, in sequence, which is
     // equivalent and avoids a nested-mutex-take deadlock.
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = ld2402_set_output_mode(on, 1000);
     ld2402_end_config(configTimeoutMs);
     return ok;
@@ -980,7 +985,12 @@ bool ld2402_set_and_save_max_distance_m(float meters, uint16_t configTimeoutMs, 
     // Save button sends range and delay together every time it is pressed,
     // so without this, saving a delay change also rewrote an unchanged range.
     if (s_max_distance_m >= 0 && fabsf(s_max_distance_m - meters) < 0.05f) return true;
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = ld2402_set_max_distance_m(meters, 1000);
     if (ok) ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);
     ld2402_end_config(configTimeoutMs);
@@ -989,7 +999,12 @@ bool ld2402_set_and_save_max_distance_m(float meters, uint16_t configTimeoutMs, 
 
 bool ld2402_set_and_save_disappear_delay_s(uint16_t seconds, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (s_disappear_delay_s >= 0 && s_disappear_delay_s == (int32_t)seconds) return true;
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = ld2402_set_disappear_delay_s(seconds, 1000);
     if (ok) ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);
     ld2402_end_config(configTimeoutMs);
@@ -1035,7 +1050,12 @@ bool ld2402_read_motionless_threshold_db(uint8_t gate, float *db, uint16_t timeo
 bool ld2402_set_and_save_trigger_threshold_db(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
     if (s_thresholds_valid && fabsf(s_trigger_th[gate] - db) < 0.05f) return true;
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = ld2402_set_trigger_threshold_db(gate, db, 1000);
     if (ok) ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);
     ld2402_end_config(configTimeoutMs);
@@ -1045,7 +1065,12 @@ bool ld2402_set_and_save_trigger_threshold_db(uint8_t gate, float db, uint16_t c
 bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     if (gate > 15) return false;
     if (s_thresholds_valid && fabsf(s_motionless_th[gate] - db) < 0.05f) return true;
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = ld2402_set_motionless_threshold_db(gate, db, 1000);
     if (ok) ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);
     ld2402_end_config(configTimeoutMs);
@@ -1068,7 +1093,12 @@ bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_
 // because "unknown" must never be mistaken for "unchanged".
 bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    ld2402_enable_config(configTimeoutMs);
+    // Bail if config mode was refused. Ignoring this meant the commands
+    // below were sent to a module that was not listening: every one of
+    // them failed, and a restore of all 32 thresholds reported "sensor
+    // did not ack" having written nothing. It also called end_config(),
+    // releasing a session lock this call never took.
+    if (!ld2402_enable_config(configTimeoutMs)) return false;
     bool ok = true;
     int written = 0;
 
