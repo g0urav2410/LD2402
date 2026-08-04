@@ -336,6 +336,19 @@ static volatile bool s_calibrating = false;
 // expected rather than a fault.
 static volatile bool s_autogain_running = false;
 
+// How long past the end of such an operation the silence is still expected.
+//
+// Clearing the flag the moment the operation returns was not enough: the
+// module does not resume streaming instantly, so the watchdog caught the tail
+// of the quiet period and reported exactly the dropout this was meant to
+// suppress -- just a few seconds later. Measured gap was ~5s, so this leaves
+// room without being long enough to hide a real fault.
+static volatile int64_t s_quiet_until_us = 0;
+
+static void expect_quiet_for(int64_t seconds) {
+    s_quiet_until_us = esp_timer_get_time() + seconds * 1000000LL;
+}
+
 // Cached copies of what the module holds, readable without touching the UART.
 //
 // Every read below otherwise costs a config-mode session and a round trip per
@@ -600,7 +613,8 @@ static void engineering_watchdog_task(void *arg) {
         //
         // The state is still tracked, so a genuine dropout that happens to
         // start during an operation is still noticed once it ends.
-        const bool expected_quiet = s_calibrating || s_autogain_running;
+        const bool expected_quiet = s_calibrating || s_autogain_running ||
+                                    esp_timer_get_time() < s_quiet_until_us;
         if (r.connected != was_connected && !expected_quiet) {
             if (r.connected) {
                 if (first_pass) {
@@ -1078,7 +1092,10 @@ bool ld2402_calibration_progress(uint8_t *percent, uint16_t timeoutMs) {
     // calibration just rewrote. Polling this to completion is what every
     // caller already does, so there is no separate "calibration finished"
     // event to hang this off.
-    if (*percent >= 100) s_calibrating = false;
+    if (*percent >= 100) {
+        s_calibrating = false;
+        expect_quiet_for(10);
+    }
     return true;
 }
 
@@ -1153,5 +1170,6 @@ bool ld2402_auto_gain_done(uint16_t timeoutMs) {
     // auto-gain finishes -- not a reply to a request we send.
     const bool done = waitEvent(0x00F0, timeoutMs);
     s_autogain_running = false;
+    expect_quiet_for(10);
     return done;
 }
