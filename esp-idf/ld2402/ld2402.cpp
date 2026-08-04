@@ -336,14 +336,24 @@ static volatile bool s_calibrating = false;
 // expected rather than a fault.
 static volatile bool s_autogain_running = false;
 
-// How long past the end of such an operation the silence is still expected.
+// Two different questions, deliberately kept apart -- conflating them was a
+// real bug.
 //
-// Clearing the flag the moment the operation returns was not enough: the
-// module does not resume streaming instantly, so the watchdog caught the tail
-// of the quiet period and reported exactly the dropout this was meant to
-// suppress -- just a few seconds later. Measured gap was ~5s, so this leaves
-// room without being long enough to hide a real fault.
-static volatile int64_t s_quiet_until_us = 0;
+//   s_quiet_log_until_us : "don't call this silence a dropout." Set whenever
+//                          the stream is expected to be interrupted, which
+//                          includes every ordinary config session.
+//   s_busy_until_us      : "the module will refuse commands until then." Set
+//                          only after calibration and auto-gain, which leave
+//                          it genuinely unresponsive for a few seconds.
+//
+// Only the second is ever waited on. When exiting a plain config session also
+// set the second one, a multi-step write -- engineering mode, then max range,
+// then delay, then 32 thresholds, each its own session -- made every step wait
+// out the previous step's window. That turned a restore into 15-20 seconds and
+// pushed it past the app's timeout, so the app reported failure while the
+// device carried on and applied everything.
+static volatile int64_t s_quiet_log_until_us = 0;
+static volatile int64_t s_busy_until_us = 0;
 
 // What the module is busy with, in words a user would recognise. Null when
 // nothing has claimed it.
@@ -353,8 +363,16 @@ static const char *s_quiet_reason = nullptr;
 // does not stream while config mode is held, which is expected silence.
 static volatile bool s_in_config = false;
 
-static void expect_quiet_for(int64_t seconds) {
-    s_quiet_until_us = esp_timer_get_time() + seconds * 1000000LL;
+// The stream will be interrupted; don't report it as a fault.
+static void expect_stream_gap_for(int64_t seconds) {
+    s_quiet_log_until_us = esp_timer_get_time() + seconds * 1000000LL;
+}
+
+// The module itself will refuse commands; anything wanting a config session
+// must wait. Implies a stream gap too.
+static void expect_module_busy_for(int64_t seconds) {
+    s_busy_until_us = esp_timer_get_time() + seconds * 1000000LL;
+    expect_stream_gap_for(seconds);
 }
 
 // Cached copies of what the module holds, readable without touching the UART.
@@ -625,7 +643,7 @@ static void engineering_watchdog_task(void *arg) {
         // genuinely does stop reporting for a few seconds, and a log that
         // skips it leaves an unexplained gap. So it says which it is.
         const bool expected_quiet = s_calibrating || s_autogain_running || s_in_config ||
-                                    esp_timer_get_time() < s_quiet_until_us;
+                                    esp_timer_get_time() < s_quiet_log_until_us;
 
         if (r.connected != was_connected) {
             if (!r.connected) {
@@ -805,8 +823,8 @@ bool ld2402_enable_config(uint16_t timeoutMs) {
     if (s_calibrating || s_autogain_running) return false;
 
     const int64_t wait_until =
-        (s_quiet_until_us < esp_timer_get_time() + 6000000LL) ? s_quiet_until_us
-                                                              : esp_timer_get_time() + 6000000LL;
+        (s_busy_until_us < esp_timer_get_time() + 6000000LL) ? s_busy_until_us
+                                                             : esp_timer_get_time() + 6000000LL;
     while (esp_timer_get_time() < wait_until && !s_calibrating && !s_autogain_running) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -863,8 +881,10 @@ bool ld2402_end_config(uint16_t timeoutMs) {
         }
     }
     s_in_config = false;
-    // The stream takes a moment to come back after config mode is left.
-    expect_quiet_for(4);
+    // A logging grace only. Deliberately NOT expect_module_busy_for(): the
+    // module accepts commands again immediately after a plain config exit, and
+    // making the next session wait here is what made multi-step writes crawl.
+    expect_stream_gap_for(4);
     xSemaphoreGive(s_session_mutex);
     return ok;
 }
@@ -1198,7 +1218,7 @@ bool ld2402_calibration_progress(uint8_t *percent, uint16_t timeoutMs) {
     // event to hang this off.
     if (*percent >= 100) {
         s_calibrating = false;
-        expect_quiet_for(10);
+        expect_module_busy_for(10);
     }
     return true;
 }
@@ -1290,6 +1310,6 @@ bool ld2402_auto_gain_done(uint16_t timeoutMs) {
     // auto-gain finishes -- not a reply to a request we send.
     const bool done = waitEvent(0x00F0, timeoutMs);
     s_autogain_running = false;
-    expect_quiet_for(10);
+    expect_module_busy_for(10);
     return done;
 }
