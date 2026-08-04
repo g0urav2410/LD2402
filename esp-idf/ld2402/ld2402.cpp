@@ -349,6 +349,10 @@ static volatile int64_t s_quiet_until_us = 0;
 // nothing has claimed it.
 static const char *s_quiet_reason = nullptr;
 
+// True between a successful enable_config() and its end_config(). The module
+// does not stream while config mode is held, which is expected silence.
+static volatile bool s_in_config = false;
+
 static void expect_quiet_for(int64_t seconds) {
     s_quiet_until_us = esp_timer_get_time() + seconds * 1000000LL;
 }
@@ -620,7 +624,7 @@ static void engineering_watchdog_task(void *arg) {
         // Saying nothing at all would be worse in a different way: the sensor
         // genuinely does stop reporting for a few seconds, and a log that
         // skips it leaves an unexplained gap. So it says which it is.
-        const bool expected_quiet = s_calibrating || s_autogain_running ||
+        const bool expected_quiet = s_calibrating || s_autogain_running || s_in_config ||
                                     esp_timer_get_time() < s_quiet_until_us;
 
         if (r.connected != was_connected) {
@@ -828,7 +832,15 @@ bool ld2402_enable_config(uint16_t timeoutMs) {
         uint8_t discard;
         while (uartReadByte(&discard, 0)) {}   // drop buffered stream bytes
         sendCommand(0x00FF, val, 2);
-        if (waitAck(0x00FF, 250)) return true;   // session_mutex stays held until end_config()
+        if (waitAck(0x00FF, 250)) {
+            // Config mode stops the module streaming, for as long as the
+            // session is held -- a bulk threshold write is ten seconds of it.
+            // Without a reason set, that reads as "stopped responding", which
+            // is the wording reserved for silence nobody asked for.
+            s_quiet_reason = "a settings write";
+            s_in_config = true;
+            return true;   // session_mutex stays held until end_config()
+        }
     } while (esp_timer_get_time() < deadline);
 
     xSemaphoreGive(s_session_mutex);
@@ -850,6 +862,9 @@ bool ld2402_end_config(uint16_t timeoutMs) {
             else vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
+    s_in_config = false;
+    // The stream takes a moment to come back after config mode is left.
+    expect_quiet_for(4);
     xSemaphoreGive(s_session_mutex);
     return ok;
 }
