@@ -1127,6 +1127,15 @@ bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionles
     } else if (ok) {
         ESP_LOGI(TAG, "wrote %d of 32 thresholds", written);
         ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);
+        if (!ok) {
+            // The writes applied but the commit did not. The cache mirrors
+            // what was *sent*, so leaving it intact would make the retry look
+            // like a no-op ("unchanged -- no write") and flash would stay
+            // stale for good, with nothing on screen saying so. Dropping it
+            // forces the next attempt to re-read the module and write again.
+            ESP_LOGW(TAG, "commit refused -- dropping cache so a retry rewrites");
+            invalidate_threshold_cache();
+        }
     }
     ld2402_end_config(configTimeoutMs);
     return ok;
@@ -1203,10 +1212,25 @@ bool ld2402_read_calibration_interference(bool *hadInterference, uint16_t *gateM
 bool ld2402_save_parameters(uint16_t timeoutMs) {
     UartSession s;
     if (!s.held) return false;
-    sendCommand(0x00FD, nullptr, 0);
-    if (!waitAck(0x00FD, timeoutMs)) return false;
-    vTaskDelay(pdMS_TO_TICKS(500));   // module needs time to commit to flash before config exits
-    return true;
+
+    // Retried, because this is the one command whose failure is silent and
+    // expensive. 0x00FD only *requests* the commit -- the module's main loop
+    // does the erase and write -- so it can decline while busy with flash
+    // work of its own, which is exactly the state it is in for a while after
+    // a calibration. Observed: 32 threshold writes all landed and only the
+    // commit was refused, leaving the values live in RAM and absent from
+    // flash, to be lost at the next power cut.
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+        sendCommand(0x00FD, nullptr, 0);
+        if (waitAck(0x00FD, timeoutMs)) {
+            // The module needs a moment to finish committing before config
+            // mode is exited underneath it.
+            vTaskDelay(pdMS_TO_TICKS(500));
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(400));
+    }
+    return false;
 }
 
 // Restarts the module (command 0x00EF, confirmed in the v3.3.5 disassembly).
