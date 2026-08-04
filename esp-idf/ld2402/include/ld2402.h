@@ -69,6 +69,20 @@ typedef struct {
 // keeps `ld2402_reading_t` current. Call once.
 esp_err_t ld2402_init(const ld2402_config_t *cfg);
 
+// Cached reads -- no UART, no config mode, safe to call as often as you like.
+//
+// The slow equivalents below each cost a config-mode session and a round trip
+// per value (32 of them for the whole threshold set). On a host whose web
+// server handles one request at a time, that is seconds during which nothing
+// else gets answered, which is exactly what makes a settings screen feel
+// stuck. These serve the copies the driver already maintains.
+//
+// false means the value has not been read from the module yet -- do the slow
+// read once, and these are populated as a side effect.
+bool ld2402_get_cached_thresholds(float trigger_db[16], float motionless_db[16]);
+bool ld2402_get_cached_max_distance_m(float *meters);
+bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
+
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
 // sensor -- reads a cached struct under a short mutex hold.
 void ld2402_get_reading(ld2402_reading_t *out);

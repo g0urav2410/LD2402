@@ -330,6 +330,38 @@ static void invalidate_threshold_cache(void) {
 // while the module is busy measuring the room.
 static volatile bool s_calibrating = false;
 
+// Cached copies of what the module holds, readable without touching the UART.
+//
+// Every read below otherwise costs a config-mode session and a round trip per
+// value -- 32 of them for the full threshold set, which is seconds of the
+// caller's time and, on a single-task HTTP server, seconds during which
+// nothing else is answered. The driver already keeps these in step (it has
+// to: the classifier compares live energy against the thresholds on every
+// frame), so serving a settings screen from them is free and exact.
+//
+// Each returns false when the value has not been learned yet, which is the
+// caller's cue to do the slow read once.
+
+bool ld2402_get_cached_thresholds(float trigger_db[16], float motionless_db[16]) {
+    if (!s_thresholds_valid) return false;
+    if (trigger_db) memcpy(trigger_db, s_trigger_th, sizeof(s_trigger_th));
+    if (motionless_db) memcpy(motionless_db, s_motionless_th, sizeof(s_motionless_th));
+    return true;
+}
+
+bool ld2402_get_cached_max_distance_m(float *meters) {
+    if (s_max_distance_m < 0) return false;
+    if (meters) *meters = s_max_distance_m;
+    return true;
+}
+
+bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds) {
+    if (s_disappear_delay_s < 0) return false;
+    if (seconds) *seconds = (uint16_t)s_disappear_delay_s;
+    return true;
+}
+
+
 // What engineering mode *should* be, as last requested. The watchdog restores
 // it after the module reboots itself. Defaults to on: streaming the energy
 // gates is the reason to use this driver over the module's plain IO pin.
