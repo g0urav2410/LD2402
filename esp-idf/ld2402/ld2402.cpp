@@ -1246,6 +1246,12 @@ bool ld2402_read_all_thresholds(float triggerDb[16], float motionlessDb[16],
 
 bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
+    return ld2402_write_all_thresholds(triggerDb, motionlessDb, true,
+                                        configTimeoutMs, saveTimeoutMs);
+}
+
+bool ld2402_write_all_thresholds(const float triggerDb[16], const float motionlessDb[16],
+                                  bool commit, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     // Counted before anything is skipped, so the total matches what the caller
     // asked for rather than what turned out to need writing -- a bar that
     // shrinks its own scale mid-run is worse than no bar.
@@ -1310,6 +1316,11 @@ bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionles
 
     if (written == 0) {
         ESP_LOGI(TAG, "thresholds unchanged -- no write");
+    } else if (ok && !commit) {
+        // Left in the module's RAM on purpose: in effect now, gone on its
+        // next power cycle. For a control being dragged, that is the point --
+        // no flash erase per adjustment.
+        ESP_LOGI(TAG, "wrote %d of 32 thresholds (not committed)", written);
     } else if (ok) {
         ESP_LOGI(TAG, "wrote %d of 32 thresholds", written);
         ok = ld2402_save_parameters(saveTimeoutMs ? saveTimeoutMs : 2000);

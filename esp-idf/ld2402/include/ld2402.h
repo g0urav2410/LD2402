@@ -187,6 +187,19 @@ bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_
 bool ld2402_save_all_thresholds(const float trigger_db[16], const float motionless_db[16],
                                 uint16_t config_timeout_ms, uint16_t save_timeout_ms);
 
+// The same write, with a say in whether it reaches the module's flash.
+//
+// `commit == false` leaves the values in the module's RAM: they take effect
+// immediately and are gone on its next power cycle. That is what a live
+// control wants -- something you can drag, watch, and change your mind about
+// without spending a flash erase per adjustment on a part with a finite
+// number of them and no documented wear levelling.
+//
+// `commit == true` is exactly ld2402_save_all_thresholds().
+bool ld2402_write_all_thresholds(const float trigger_db[16], const float motionless_db[16],
+                                  bool commit, uint16_t config_timeout_ms,
+                                  uint16_t save_timeout_ms);
+
 bool ld2402_read_power_interference(uint8_t *status, uint16_t timeout_ms);   // 0 not run, 1 clear, 2 interference
 
 // Auto threshold calibration. factor 1-20ish (module multiplies by 10 internally).
