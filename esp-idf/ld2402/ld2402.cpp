@@ -282,6 +282,14 @@ static uint8_t s_lineLen = 0;
 #define LD2402_STATE_NOBODY 0x00
 #define LD2402_STATE_MOVING 0x01
 #define LD2402_STATE_STILL  0x02
+// How much payload one command may carry. The module reports this when
+// config mode is entered (0x0020 = 32 bytes on v3.3.5); this default is what
+// is assumed until it does. It sets how many parameters fit in one batched
+// read or write -- see ld2402_read_parameters_raw().
+#define CMD_BUFSIZE_DEFAULT 32
+#define CMD_BUFSIZE_MAX     64
+static uint16_t s_cmd_bufsize = CMD_BUFSIZE_DEFAULT;
+
 static uint8_t s_state = 0;
 static uint16_t s_distanceCm = 0;
 static bool s_engineering = false;
@@ -714,11 +722,7 @@ static void threshold_cache_task(void *arg) {
             }
             continue;
         }
-        float db;
-        for (int g = 0; g < 16; g++) {
-            ld2402_read_trigger_threshold_db(g, &db, 1000);
-            ld2402_read_motionless_threshold_db(g, &db, 1000);
-        }
+        ld2402_read_all_thresholds(nullptr, nullptr, 1000);
         ld2402_end_config(1000);
         if (s_thresholds_valid) {
             ESP_LOGI(TAG, "threshold cache primed");
@@ -834,7 +838,21 @@ bool ld2402_enable_config(uint16_t timeoutMs) {
         uint8_t discard;
         while (uartReadByte(&discard, 0)) {}   // drop buffered stream bytes
         sendCommand(0x00FF, val, 2);
-        if (waitAck(0x00FF, 250)) {
+        uint8_t hello[8];
+        uint16_t helloLen = 0;
+        if (waitAck(0x00FF, 250, hello, sizeof(hello), &helloLen)) {
+            // The ACK carries the protocol version and the module's command
+            // buffer size (manual 5.2.2). The buffer size is how much payload
+            // one command may carry, which is what makes batching safe: read
+            // and write take N records per frame, and this is the only thing
+            // that says how many N may be.
+            if (helloLen >= 4) {
+                uint16_t bufsize = hello[2] | ((uint16_t)hello[3] << 8);
+                // Believe it only within reason. A garbled ACK reporting a
+                // huge buffer would build frames the module then rejects, and
+                // one reporting 0 would divide the batch size to nothing.
+                if (bufsize >= 8 && bufsize <= CMD_BUFSIZE_MAX) s_cmd_bufsize = bufsize;
+            }
             // Config mode stops the module streaming, for as long as the
             // session is held -- a bulk threshold write is ten seconds of it.
             // Without a reason set, that reads as "stopped responding", which
@@ -945,6 +963,85 @@ bool ld2402_read_parameter_raw(uint16_t id, uint32_t *value, uint16_t timeoutMs)
     uint16_t n = 0;
     if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &n) || n < 4) return false;
     *value = (uint32_t)extra[0] | ((uint32_t)extra[1] << 8) | ((uint32_t)extra[2] << 16) | ((uint32_t)extra[3] << 24);
+    return true;
+}
+
+// Batched read. The manual's read command (0x0008) takes N parameter ids and
+// answers with N values -- "(2-byte parameter ID) * N" in, "(4-byte parameter
+// value) * N" out (manual 5.2.6). This driver sent exactly one per command
+// for a long time, which made fetching all 32 thresholds 32 separate
+// command/ACK round trips and is most of why that took seconds.
+//
+// Split into as many frames as the module's buffer allows, transparently, so
+// callers just ask for what they want.
+bool ld2402_read_parameters_raw(const uint16_t *ids, uint32_t *values,
+                                 uint8_t count, uint16_t timeoutMs) {
+    if (!ids || !values || count == 0) return false;
+    UartSession s;
+    if (!s.held) return false;
+
+    const uint8_t perFrame = (uint8_t)(s_cmd_bufsize / 2);   // 2 bytes per id
+    uint8_t done = 0;
+    while (done < count) {
+        uint8_t n = count - done;
+        if (n > perFrame) n = perFrame;
+
+        uint8_t req[CMD_BUFSIZE_MAX];
+        for (uint8_t i = 0; i < n; i++) {
+            req[i * 2]     = (uint8_t)(ids[done + i] & 0xFF);
+            req[i * 2 + 1] = (uint8_t)(ids[done + i] >> 8);
+        }
+        sendCommand(0x0008, req, (uint16_t)(n * 2));
+
+        uint8_t extra[CMD_BUFSIZE_MAX * 2];
+        uint16_t got = 0;
+        if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &got)) return false;
+        // Short reply means the module answered fewer than asked. Treating a
+        // partial answer as success would hand back stale stack contents for
+        // the rest, which is worse than failing.
+        if (got < (uint16_t)(n * 4)) return false;
+
+        for (uint8_t i = 0; i < n; i++) {
+            const uint8_t *p = extra + i * 4;
+            values[done + i] = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                                ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        }
+        done += n;
+    }
+    return true;
+}
+
+// Batched write, same idea: "(2-byte parameter ID + 4-byte parameter value)
+// * N" (manual 5.2.7). Six bytes per record, so fewer fit per frame than on
+// the read side.
+bool ld2402_set_parameters_raw(const uint16_t *ids, const uint32_t *values,
+                                uint8_t count, uint16_t timeoutMs) {
+    if (!ids || !values || count == 0) return false;
+    UartSession s;
+    if (!s.held) return false;
+
+    const uint8_t perFrame = (uint8_t)(s_cmd_bufsize / 6);   // 6 bytes per record
+    uint8_t done = 0;
+    while (done < count) {
+        uint8_t n = count - done;
+        if (n > perFrame) n = perFrame;
+
+        uint8_t req[CMD_BUFSIZE_MAX];
+        for (uint8_t i = 0; i < n; i++) {
+            uint8_t *p = req + i * 6;
+            const uint16_t id = ids[done + i];
+            const uint32_t v  = values[done + i];
+            p[0] = (uint8_t)(id & 0xFF);
+            p[1] = (uint8_t)(id >> 8);
+            p[2] = (uint8_t)v;
+            p[3] = (uint8_t)(v >> 8);
+            p[4] = (uint8_t)(v >> 16);
+            p[5] = (uint8_t)(v >> 24);
+        }
+        sendCommand(0x0007, req, (uint16_t)(n * 6));
+        if (!waitAck(0x0007, timeoutMs)) return false;
+        done += n;
+    }
     return true;
 }
 
@@ -1115,6 +1212,38 @@ void ld2402_bulk_write_progress(int *done, int *total) {
     if (total) *total = s_bulk_total;
 }
 
+// All 32 thresholds in one go, using batched reads: two frames instead of 32
+// command/ACK round trips. Caller must already hold a config session.
+//
+// Both outputs are optional -- passing null for each still primes the
+// driver's cache, which is the only reason the priming task calls this.
+bool ld2402_read_all_thresholds(float triggerDb[16], float motionlessDb[16],
+                                 uint16_t timeoutMs) {
+    uint16_t ids[16];
+    uint32_t raw[16];
+
+    for (uint8_t g = 0; g < 16; g++) ids[g] = (uint16_t)(0x0010 + g);
+    if (!ld2402_read_parameters_raw(ids, raw, 16, timeoutMs)) return false;
+    for (uint8_t g = 0; g < 16; g++) {
+        const float db = dbFromRaw(raw[g]);
+        if (triggerDb) triggerDb[g] = db;
+        s_trigger_th[g] = db;
+        s_trigger_seen |= (uint16_t)(1u << g);
+    }
+
+    for (uint8_t g = 0; g < 16; g++) ids[g] = (uint16_t)(0x0030 + g);
+    if (!ld2402_read_parameters_raw(ids, raw, 16, timeoutMs)) return false;
+    for (uint8_t g = 0; g < 16; g++) {
+        const float db = dbFromRaw(raw[g]);
+        if (motionlessDb) motionlessDb[g] = db;
+        s_motionless_th[g] = db;
+        s_motionless_seen |= (uint16_t)(1u << g);
+    }
+
+    note_thresholds_progress();
+    return true;
+}
+
 bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionlessDb[16],
                                 uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
     // Counted before anything is skipped, so the total matches what the caller
@@ -1136,20 +1265,46 @@ bool ld2402_save_all_thresholds(const float triggerDb[16], const float motionles
     // real edit is far larger than this.
     auto same = [](float a, float b) { return fabsf(a - b) < 0.05f; };
 
+    // Collect what actually changed, then write it in batched frames rather
+    // than one command per gate. Unchanged gates are still counted towards
+    // progress, so the bar reflects what the caller asked for.
+    uint16_t ids[32];
+    uint32_t vals[32];
+    uint8_t n = 0;
+
     if (triggerDb) {
         for (uint8_t i = 0; i < 16; i++) {
             s_bulk_done++;
             if (s_thresholds_valid && same(triggerDb[i], s_trigger_th[i])) continue;
-            ok &= ld2402_set_trigger_threshold_db(i, triggerDb[i], 1000);
-            written++;
+            ids[n] = (uint16_t)(0x0010 + i);
+            vals[n] = rawFromDb(triggerDb[i]);
+            n++;
         }
     }
     if (motionlessDb) {
         for (uint8_t i = 0; i < 16; i++) {
             s_bulk_done++;
             if (s_thresholds_valid && same(motionlessDb[i], s_motionless_th[i])) continue;
-            ok &= ld2402_set_motionless_threshold_db(i, motionlessDb[i], 1000);
-            written++;
+            ids[n] = (uint16_t)(0x0030 + i);
+            vals[n] = rawFromDb(motionlessDb[i]);
+            n++;
+        }
+    }
+
+    if (n > 0) {
+        ok = ld2402_set_parameters_raw(ids, vals, n, 1000);
+        written = n;
+        // Mirror into the cache only on success -- a cache claiming values the
+        // module never accepted would make the retry skip them as unchanged,
+        // which is exactly how a failed commit once left flash stale with
+        // nothing reporting it.
+        if (ok) {
+            for (uint8_t i = 0; i < n; i++) {
+                const uint16_t id = ids[i];
+                const float db = dbFromRaw(vals[i]);
+                if (id >= 0x0010 && id <= 0x001F) s_trigger_th[id - 0x0010] = db;
+                else if (id >= 0x0030 && id <= 0x003F) s_motionless_th[id - 0x0030] = db;
+            }
         }
     }
 

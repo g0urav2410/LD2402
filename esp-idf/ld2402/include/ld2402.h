@@ -149,6 +149,24 @@ bool ld2402_read_disappear_delay_s(uint16_t *seconds, uint16_t timeout_ms);
 bool ld2402_set_and_save_max_distance_m(float meters, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
 bool ld2402_set_and_save_disappear_delay_s(uint16_t seconds, uint16_t config_timeout_ms, uint16_t save_timeout_ms);
 
+// Batched parameter access. The module's read and write commands each take N
+// records per frame (manual 5.2.6 / 5.2.7), and this driver used to send one
+// per command -- so reading all 32 thresholds meant 32 command/ACK round
+// trips, which is most of why that took seconds. These split the request
+// across as many frames as the module's reported buffer allows.
+//
+// Caller must already hold a config session.
+bool ld2402_read_parameters_raw(const uint16_t *ids, uint32_t *values,
+                                 uint8_t count, uint16_t timeout_ms);
+bool ld2402_set_parameters_raw(const uint16_t *ids, const uint32_t *values,
+                                uint8_t count, uint16_t timeout_ms);
+
+// All 32 thresholds in two frames rather than 32 exchanges. Either output may
+// be null -- the driver's cache is filled regardless, which is the only thing
+// the boot-time priming needs. Caller must already hold a config session.
+bool ld2402_read_all_thresholds(float trigger_db[16], float motionless_db[16],
+                                 uint16_t timeout_ms);
+
 bool ld2402_set_trigger_threshold_db(uint8_t gate, float db, uint16_t timeout_ms);   // gate 0-15
 bool ld2402_read_trigger_threshold_db(uint8_t gate, float *db, uint16_t timeout_ms);
 bool ld2402_set_motionless_threshold_db(uint8_t gate, float db, uint16_t timeout_ms);    // gate 0-15
