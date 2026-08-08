@@ -58,9 +58,9 @@ void loop() {
                      : radar.activity() == LD2402::Moving ? "moving" : "still";
     Serial.printf("%s  distance=%dcm\n", what, radar.distanceCm());
     Serial.print("motion (dB):  ");
-    for (int i = 0; i < 16; i++) Serial.printf("%.0f ", radar.motionEnergyDb(i));
+    for (int i = 0; i < 16; i++) Serial.printf("%.0f ", radar.triggerEnergyDb(i));
     Serial.println();
     Serial.print("micro  (dB):  ");
-    for (int i = 0; i < 16; i++) Serial.printf("%.0f ", radar.microEnergyDb(i));
+    for (int i = 0; i < 16; i++) Serial.printf("%.0f ", radar.motionlessEnergyDb(i));
     Serial.println();
 }

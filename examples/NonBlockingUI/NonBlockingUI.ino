@@ -68,8 +68,8 @@ void readAllThresholds() {
     radar.enableConfig(2500);
     for (uint8_t gate = 0; gate < 16; gate++) {
         float motion, micro;
-        radar.readMotionThresholdDb(gate, motion);
-        radar.readMicroThresholdDb(gate, micro);
+        radar.readTriggerThresholdDb(gate, motion);
+        radar.readMotionlessThresholdDb(gate, micro);
     }
     radar.endConfig(300);
 
