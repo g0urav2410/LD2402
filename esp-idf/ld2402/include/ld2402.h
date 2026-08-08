@@ -60,6 +60,12 @@ typedef struct {
 } ld2402_config_t;
 
 typedef struct {
+    // All three come straight from the module's own classification (the
+    // engineering frame's state byte: 0 nobody, 1 moving, 2 still), so they
+    // are mutually exclusive by construction.
+    //
+    // In ASCII mode there is no state byte, so a still person reads as
+    // moving. Keep engineering mode on -- the driver does by default.
     bool presence;         // any detection, moving or still
     bool moving;
     bool still;
@@ -103,6 +109,32 @@ bool ld2402_get_cached_thresholds(float trigger_db[16], float motionless_db[16])
 void ld2402_bulk_write_progress(int *done, int *total);
 bool ld2402_get_cached_max_distance_m(float *meters);
 bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
+
+// ---------------------------------------------------------------------------
+// Raw frame access, for looking at what the module actually sent rather than
+// what this driver made of it.
+//
+// This exists because a documented, disassembly-backed claim about the state
+// byte turned out to be wrong, and no amount of re-reading either document
+// would have shown it -- only logging the byte did. Everything the module
+// sends is decoded into ld2402_reading_t, so this is not needed in normal
+// use; it is here so the next disagreement between a datasheet and reality
+// can be settled in minutes instead of an afternoon.
+// ---------------------------------------------------------------------------
+
+// The engineering frame's first byte as received: 0 nobody, 1 moving, 2 still.
+uint8_t ld2402_debug_raw_state(void);
+
+// Bitmask of every state-byte value seen since boot -- bit N set means value
+// N has occurred. Cheap way to answer "does this module ever send X?".
+uint32_t ld2402_debug_state_seen_mask(void);
+
+// The last engineering frame body verbatim: state(1) + distance(2) + 32 u32
+// little-endian energies = 131 bytes. Returns how many bytes were copied.
+uint16_t ld2402_debug_last_frame(uint8_t *out, uint16_t cap);
+
+// Engineering frames parsed since boot. Climbing means the stream is healthy.
+uint32_t ld2402_debug_frame_count(void);
 
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
 // sensor -- reads a cached struct under a short mutex hold.

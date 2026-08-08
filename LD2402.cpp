@@ -27,6 +27,29 @@ void LD2402::loop() {
     while (_serial->available()) {
         feedByte((uint8_t)_serial->read());
     }
+    maintainEngineeringMode();
+}
+
+// Engineering mode is what makes still detection work, and the module loses
+// it whenever it restarts -- the setting lives in its RAM, not its flash. So
+// it is enabled here rather than left to the sketch: once at startup, and
+// again any time the module comes back in text mode.
+//
+// Without this, the single most common way to use this library wrongly was
+// simply forgetting one line in setup(), and the symptom -- "still never
+// happens" -- gave no hint of the cause.
+//
+// Deliberately rate-limited and gated on the module actually talking: each
+// attempt is a config-mode session that briefly stops the stream, and
+// shouting config at a module that has not booted yet just wastes a session
+// waiting for an ACK that cannot come.
+void LD2402::maintainEngineeringMode() {
+    if (!_wantEngineering || _engineering) return;
+    if (!connected()) return;
+    const unsigned long now = millis();
+    if (_lastEngAttemptMs != 0 && now - _lastEngAttemptMs < 5000) return;
+    _lastEngAttemptMs = now;
+    setEngineeringMode(true, 1000);
 }
 
 void LD2402::feedByte(uint8_t b) {
@@ -83,7 +106,7 @@ void LD2402::handleTextLine(String line) {
     line.trim();
     if (line.length() == 0) return;
     if (line == "OFF") {
-        _state = 0;
+        _state = STATE_NOBODY;
         _distanceCm = 0;
         _engineering = false;
         _lastUpdateMs = millis();
@@ -91,7 +114,8 @@ void LD2402::handleTextLine(String line) {
     }
     int colon = line.indexOf(':');
     if (line.startsWith("distance") && colon >= 0) {
-        _state = 1;
+        // Text mode has no state byte, so a still person reads as moving.
+        _state = STATE_MOVING;
         _distanceCm = (uint16_t)line.substring(colon + 1).toInt();
         _engineering = false;
         _lastUpdateMs = millis();
@@ -323,6 +347,12 @@ bool LD2402::setOutputMode(bool engineering, uint16_t timeoutMs) {
 }
 
 bool LD2402::setEngineeringMode(bool on, uint16_t configTimeoutMs) {
+    // Remembered so loop() can put the module back into this mode if it
+    // reboots on its own -- output mode lives in the module's RAM, so a power
+    // blip on the sensor alone silently drops it to text, taking still
+    // detection with it. Recorded even if the call below fails, so a retry
+    // happens rather than the request being forgotten.
+    _wantEngineering = on;
     // Bail out instead of pressing on: with config mode never entered,
     // every command below waits out its full timeout for an ACK that
     // cannot come, and endConfig() then burns three more retries. The
@@ -521,31 +551,19 @@ bool LD2402::calibrationProgress(uint8_t &percent, uint16_t timeoutMs) {
 // `if (radar.presence())`, would go on believing someone is in the room
 // forever, with nothing on screen to suggest otherwise.
 bool LD2402::presence() const {
-    return connected() && (_state & 0x0F) != 0;
+    return connected() && _state != STATE_NOBODY;
 }
 
-// One decision, made once, so the three answers cannot disagree.
+// One decision, made once, so the three answers cannot disagree -- and it is
+// the module's decision, not ours. See the STATE_* note in LD2402.h for why
+// this replaced a classifier that compared gate energies against thresholds.
 //
-// Absent is decided first and absolutely: with nobody detected, "moving" is
-// not a question worth asking. Only then do the gate energies pick between
-// Moving and Still -- mirroring the module's own peak selection, scanning
-// gates 1..15 for any whose motion energy clears that gate's trigger
-// threshold. Gate 0 is skipped for the reason the module skips it: its
-// threshold is never evaluated, so including it would let near-field clutter
-// set a flag no configuration change could clear.
-//
-// Without a threshold cache there is nothing to compare against, so anyone
-// present is reported as Moving -- the safer of the two wrong answers, since
-// a missed still-person is a sensor that looks broken while a missed movement
-// is merely a sensor that looks insensitive.
+// In ASCII mode there is no state byte, so feedByte() can only ever set
+// NOBODY or MOVING and a still person reads as moving. That is a limit of
+// text mode: call setEngineeringMode(true) to get real still detection.
 LD2402::Activity LD2402::activity() const {
     if (!presence()) return Absent;
-    if (!_engineering || !_thresholdsValid) return Moving;
-    for (uint8_t g = 1; g < 16; g++) {
-        const float e = triggerEnergyDb(g);
-        if (!isnan(e) && e > _triggerTh[g]) return Moving;
-    }
-    return Still;
+    return _state == STATE_STILL ? Still : Moving;
 }
 
 void LD2402::invalidateThresholdCache() {
@@ -594,7 +612,7 @@ bool LD2402::reboot(uint16_t timeoutMs) {
     // persistent at all, so it comes back in text mode with no energy gates.
     invalidateThresholdCache();
     _engineering = false;
-    _state = 0;
+    _state = STATE_NOBODY;
     _distanceCm = 0;
     return true;
 }

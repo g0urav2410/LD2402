@@ -1,17 +1,21 @@
-// BasicPresence -- minimal example: prints presence + distance to the
-// Serial Monitor. Wire the sensor's T/R pins to the board's hardware UART
-// (see README.md "Wiring"), then flash this.
+// BasicPresence -- prints presence, movement and distance to the Serial
+// Monitor. Wire the sensor's T/R pins to a spare hardware UART (see
+// README.md "Wiring"), then flash this.
 //
-// The module has the UART to itself here, so loop() is all that's needed --
-// no manual byte routing. See the SharedUART example if something else
-// (a debug console, another sensor) needs the same wire.
+// Note the sensor gets its OWN serial port, separate from the USB one you
+// read the output on. Sharing them means your debug prints get sent to the
+// sensor and the sensor's frames get printed as garbage.
 #include <LD2402.h>
 
 LD2402 radar;
 
 void setup() {
-    Serial.begin(115200);
-    radar.begin(Serial);
+    Serial.begin(115200);    // USB, for reading this output
+    Serial1.begin(115200);   // the sensor
+    radar.begin(Serial1);
+
+    // Nothing else needed. loop() switches the sensor into the output mode
+    // that reports moving vs still, and puts it back if the sensor restarts.
 }
 
 void loop() {
@@ -25,11 +29,21 @@ void loop() {
         Serial.println("(no data from sensor yet)");
         return;
     }
-    if (radar.presence()) {
-        Serial.printf("Presence: %s, %d cm\n",
-                       radar.isMoving() ? "moving" : "still",
-                       radar.distanceCm());
-    } else {
-        Serial.println("Presence: none");
+    if (!radar.haveEnergyGates()) {
+        // Still switching the sensor over -- takes a few seconds after boot.
+        Serial.println("(waiting for the sensor to switch output mode)");
+        return;
+    }
+
+    switch (radar.activity()) {
+        case LD2402::Absent:
+            Serial.println("empty");
+            break;
+        case LD2402::Moving:
+            Serial.printf("moving, %d cm\n", radar.distanceCm());
+            break;
+        case LD2402::Still:
+            Serial.printf("still, %d cm\n", radar.distanceCm());
+            break;
     }
 }

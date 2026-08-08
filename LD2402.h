@@ -33,32 +33,30 @@ public:
 
     // ---- Live readings (updated by loop() from whatever is streaming) ----
     //
-    // A note on what the module actually tells you, because it is not what
-    // the obvious reading of its output suggests.
+    // The engineering frame's first byte IS the enum the vendor manual
+    // documents (Table 5-7): 0 nobody, 1 someone moving, 2 someone still.
     //
-    // The engineering frame's first byte is NOT an enum of none/moving/still.
-    // It is built as:
+    // This library spent a long time believing otherwise. A firmware
+    // reverse-engineering writeup decompiled the frame builder as
     //
     //     state = presence;                    // 0 or 1
-    //     if (<reporting sub-mode>) state += 0x10;
+    //     if (...) state += 0x10;
     //
-    // so the only values that ever appear on the wire are 0x00, 0x01, 0x10
-    // and 0x11. It never sends 2. This library used to read it as
-    // "1 = moving, 2 = still", which meant isStill() could not return true
-    // under any circumstances, isMoving() went false whenever the sub-mode
-    // flag happened to be set on a moving target, and 0x10 -- which means
-    // NOBODY is present -- was accepted as presence because it is non-zero.
+    // and concluded 0x02 could never appear -- so moving/still was derived
+    // instead, by comparing per-gate energies against cached thresholds.
     //
-    // Worse, the distinction genuinely is not in there to recover: inside
-    // the module the motion and micro-motion chains are merged with a plain
-    // OR into a single presence bit before the frame is built. Masking the
-    // byte differently cannot bring it back.
+    // Logging the raw byte on a real module (fw v3.3.5, the same version
+    // that writeup analysed) showed 0x00, 0x01 AND 0x02 in ordinary use, and
+    // never 0x10 or 0x11. The writeup missed a code path. The manual was
+    // right, and the module's own still detector -- a long-window CIC filter
+    // sensitive enough for breathing -- is considerably better than the
+    // energy-vs-threshold compare that had replaced it.
     //
-    // So moving/still is derived here instead, from the per-gate energies
-    // against the per-gate thresholds -- which is what the frame carries two
-    // energy arrays for. Call cacheThresholds() once after begin() to enable
-    // it; without that, isMoving() falls back to reporting any presence as
-    // movement, which is the safer of the two wrong answers.
+    // ASCII mode carries no state byte at all, so a still person reads as
+    // moving there. Call setEngineeringMode(true) for real still detection.
+    //
+    // If this is ever in doubt again: log the byte. Do not re-derive it from
+    // a document, including this comment.
     // What the room is doing, as one value instead of three booleans you have
     // to combine yourself. This is the call to prefer.
     //
@@ -68,6 +66,11 @@ public:
     // and not still" -- a state that cannot be true. One value cannot say
     // three things at once, which is the actual fix, not just nicer syntax.
     enum Activity : uint8_t { Absent = 0, Moving = 1, Still = 2 };
+
+    // The raw state byte's documented values, used by presence()/activity().
+    static constexpr uint8_t STATE_NOBODY = 0x00;
+    static constexpr uint8_t STATE_MOVING = 0x01;
+    static constexpr uint8_t STATE_STILL  = 0x02;
     Activity activity() const;
 
     bool presence() const;
@@ -76,11 +79,11 @@ public:
     bool isMoving() const { return activity() == Moving; }
     bool isStill()  const { return activity() == Still; }
 
-    // Reads all 32 thresholds into a local cache so isMoving() can classify.
-    // Enters and leaves config mode itself; call it once at startup and
-    // again after any calibration (which rewrites every threshold). Returns
-    // false if the module refused, in which case classification stays in its
-    // fallback mode.
+    // Reads all 32 thresholds into a local cache, so the setAndSave* calls
+    // can skip a flash write when a value is already what you're asking for.
+    // Detection does not depend on this -- the module classifies moving/still
+    // itself. Enters and leaves config mode; call it once at startup and
+    // again after any calibration (which rewrites every threshold).
     bool cacheThresholds(uint16_t configTimeoutMs = 2500);
     bool haveThresholdCache() const { return _thresholdsValid; }
     // Throws the cache away, so activity() drops to its safe fallback until
@@ -138,10 +141,18 @@ public:
     bool readSerialNumber(String &out, uint16_t timeoutMs = 1000);
 
     // true = binary engineering frames (presence+distance+32 energy gates)
-    // false = plain text "OFF" / "distance : NN" (factory default)
+    // false = plain text "OFF" / "distance : NN" (the module's own default)
     bool setOutputMode(bool engineering, uint16_t timeoutMs = 1000);
+
     // Convenience: wraps enableConfig()/setOutputMode()/endConfig() in one
     // call, own session -- same pattern as the setAndSave* functions below.
+    //
+    // You do not normally need to call this. loop() enables engineering mode
+    // on its own and restores it if the module restarts, because still
+    // detection does not work without it. Call it with `false` only if you
+    // deliberately want the lighter text format and can live without
+    // moving/still.
+    //
     // configTimeoutMs is passed to enableConfig(); default matches every
     // other convenience function here, but a caller doing frequent quick
     // checks (like a periodic recovery poll) can pass a much shorter one.
@@ -240,12 +251,18 @@ private:
 
     uint8_t _state = 0;   // raw state byte -- see presence() above
 
-    // Per-gate thresholds mirrored locally so isMoving() can classify without
-    // a UART round trip per frame (which would mean entering config mode
-    // several times a second and stalling the stream). Kept in step by the
-    // read/set threshold calls; only counts as usable once every gate in
-    // both sets has a real value, since comparing live energy against a
-    // half-filled table of zeros would read as permanently over threshold.
+    // Engineering mode is on unless a sketch explicitly turns it off: it is
+    // what still detection needs, and the module drops it whenever it
+    // restarts. loop() re-applies it -- see maintainEngineeringMode().
+    bool _wantEngineering = true;
+    unsigned long _lastEngAttemptMs = 0;
+    void maintainEngineeringMode();
+
+    // Per-gate thresholds mirrored locally so the setAndSave* calls can skip
+    // a flash write when nothing changed, without a UART round trip to check.
+    // Kept in step by the read/set threshold calls; only counts as usable
+    // once every gate in both sets has a real value, so that "not read yet"
+    // is never mistaken for "already correct" and a real write dropped.
     float _triggerTh[16] = {0};
     float _motionlessTh[16] = {0};
     uint16_t _trigSeen = 0, _motSeen = 0;

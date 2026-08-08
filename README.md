@@ -5,8 +5,12 @@ module that can tell if someone is in a room) from Arduino or PlatformIO.
 
 It tells you:
 - Is someone there? (`presence`)
-- Are they moving, or sitting still? (`isMoving` / `isStill`)
+- Are they moving, or sitting still? (`activity`)
 - How far away are they? (`distanceCm`)
+
+Unlike a PIR sensor, it holds detection on someone who has stopped moving —
+sitting, reading, sleeping — which is the whole reason to use radar here.
+That needs one line of setup; see [the quick start](#the-simplest-example).
 
 ## Wiring
 
@@ -49,30 +53,49 @@ void setup() {
 
 void loop() {
     radar.loop();
-    if (radar.presence()) {
-        Serial.print("Someone is ");
-        Serial.print(radar.isStill() ? "sitting still, " : "moving, ");
-        Serial.print(radar.distanceCm());
-        Serial.println(" cm away");
+    switch (radar.activity()) {
+        case LD2402::Absent: break;
+        case LD2402::Moving:
+            Serial.print("moving, ");
+            Serial.print(radar.distanceCm());
+            Serial.println(" cm away");
+            break;
+        case LD2402::Still:
+            Serial.print("sitting still, ");
+            Serial.print(radar.distanceCm());
+            Serial.println(" cm away");
+            break;
     }
 }
 ```
 
-That's the whole thing you need for most projects: `begin()` once, `loop()`
-every time round your `loop()`, then read whichever of the calls below you
-need.
+Two things and you're done: `begin()` once, and `loop()` every time round
+your sketch's `loop()`.
 
-**One extra line makes `isMoving()`/`isStill()` accurate.** Without it they
-still work, but fall back to a rougher guess. Add this once, right after
-`begin()`:
+### One thing the library does for you
 
-```cpp
-radar.cacheThresholds();
-```
+The sensor has two output formats, and **it starts in the wrong one:**
 
-This reads the sensor's own sensitivity settings so the library can tell
-moving and still apart properly. Call it again any time after you run
-calibration (below), since that changes those settings.
+| | Text (the sensor's default) | Engineering |
+|---|---|---|
+| Someone there? | yes | yes |
+| Distance | yes | yes |
+| **Moving vs still** | **no** | **yes** |
+| Per-gate signal levels | no | yes |
+
+In text format a person sitting perfectly still reads as *moving* — there is
+nothing in that format to say otherwise.
+
+So `loop()` switches the sensor to engineering mode by itself, and switches
+it back if the sensor restarts (that setting lives in the sensor's RAM, so a
+brownout or a loose wire wipes it). You don't have to do anything.
+
+If you specifically want the lighter text format and can live without
+moving/still, turn it off with `radar.setEngineeringMode(false)`.
+
+You do **not** need `cacheThresholds()` for still detection. The sensor makes
+that decision itself. That call only avoids needless writes to the sensor's
+flash — see [below](#after-calibrating-or-auto-gaining-re-read-the-thresholds).
 
 ## The main things you can ask it
 
@@ -83,7 +106,7 @@ calibration (below), since that changes those settings.
 | `radar.distanceCm()` | how far away, in centimetres |
 | `radar.connected()` | `true` if the sensor has sent data in the last 2 seconds |
 | `radar.read()` | all of the above, in one go |
-| `radar.isMoving()` / `radar.isStill()` | the old booleans, still here so old sketches compile |
+| `radar.isMoving()` / `radar.isStill()` | the same answer as two booleans, if that reads better in your code |
 
 `activity()` gives you one answer instead of three booleans you have to
 combine yourself:
@@ -111,6 +134,41 @@ goes false and `distanceCm()` goes 0 once nothing has arrived for 2 seconds.
 That's deliberate: holding the last reading forever means an unplugged sensor
 still insists someone is in the room. Use `connected()` if you need to tell
 "nobody's there" apart from "the sensor is gone".
+
+## Where moving/still comes from
+
+The sensor decides it, and this library just reports what it says. Worth
+knowing because getting this wrong cost a lot of time.
+
+Each frame's first byte is the answer: `0` nobody, `1` moving, `2` still.
+That matches the vendor manual, and it is what a real module sends.
+
+A firmware disassembly of the module once concluded that byte could only ever
+be `0` or `1` — that the moving/still distinction was destroyed inside the
+chip before transmission. This library believed that, and rebuilt the answer
+itself by comparing per-gate signal levels against per-gate thresholds.
+Logging the raw byte on real hardware (firmware v3.3.5 — the *same* version
+the disassembly examined) showed `2` arriving in ordinary use. The
+disassembly had missed a code path.
+
+That derived classifier is gone. The sensor's own still detector is a
+long-window filter sensitive enough to pick up breathing; nothing built from
+threshold comparisons was going to match it.
+
+**If you ever doubt this: log the byte.** Don't re-derive it from a document,
+including this one.
+
+### "Still" never triggers — what to check
+
+1. **Engineering mode off.** Check `haveEnergyGates()`. `loop()` turns it on
+   by itself, so this should only happen if you turned it off, or if the
+   sensor isn't responding to config commands at all.
+2. **Too close or too far.** Deep-stillness detection only covers roughly
+   **2.8 m to 4.9 m** (gates 4–7). That range is hard-wired into the sensor;
+   no threshold changes it. Outside it, a motionless person eventually reads
+   as absent.
+3. **Not actually still enough.** The sensor is sensitive — small movements
+   still count as movement.
 
 ## Making it more/less sensitive to distance
 
@@ -177,11 +235,15 @@ if (radar.haveEnergyGates()) {
 }
 ```
 
-There are two numbers per gate, because "moving" and "sitting still" are
-detected separately: every gate has its own trigger reading (compared
-against `setAndSaveTriggerThresholdDb`) and its own motionless reading
-(compared against `setAndSaveMotionlessThresholdDb`, below). Both are in dB.
-The further down the list, the further away that gate is.
+There are two numbers per gate, because the sensor runs two detectors: one
+tuned for movement (compared against `setAndSaveTriggerThresholdDb`) and one
+for stillness (compared against `setAndSaveMotionlessThresholdDb`, below).
+Both are in dB. The further down the list, the further away that gate is.
+
+These are the numbers the *sensor* compares against its thresholds to decide
+moving vs still. You don't need to do that comparison yourself — the sensor
+already hands you the result. They're here so you can see how close a reading
+is to triggering, which is what a tuning screen needs.
 
 ### Adjusting sensitivity at a specific distance
 
@@ -238,23 +300,25 @@ radar.autoGainDone();   // waits until the sensor finishes adjusting itself
 radar.reboot();
 ```
 
-Handy when it's got into a strange state. It comes back in plain text mode
-(that setting isn't saved on the sensor), so call `setEngineeringMode(true)`
-again afterwards if you were using it. There's no factory-reset command —
-the sensor doesn't have one — so restoring defaults means writing the values
-back yourself.
+Handy when it's got into a strange state. It comes back in plain text mode —
+that setting isn't saved on the sensor — but `loop()` notices and puts it
+back within a few seconds. Thresholds *are* saved and survive the reboot.
+
+There's no factory-reset command; the sensor doesn't have one. Restoring
+defaults means writing the values back yourself.
 
 ### After calibrating or auto-gaining, re-read the thresholds
 
-Both change the sensor's thresholds, which the library keeps a local copy of
-in order to tell moving from still. It drops that copy automatically so it
-can't classify against stale numbers — but that means `activity()` falls back
-to "anyone present counts as moving" until you refresh it:
+Both rewrite the sensor's thresholds, so the library's local copy of them is
+now wrong. It drops that copy automatically. Detection keeps working — the
+sensor classifies moving/still on its own — but until you refresh the copy,
+the library can't tell whether a threshold you're setting is already the
+value the sensor holds, so it writes it again regardless:
 
 ```cpp
 radar.startCalibration();
 // ...poll calibrationProgress() to 100...
-radar.cacheThresholds();     // moving/still accurate again
+radar.cacheThresholds();     // avoids redundant flash writes again
 ```
 
 ### Getting the sensor's info
@@ -329,19 +393,23 @@ ld2402_init(&cfg);
 Calls are `ld2402_*` versions of the same things — `ld2402_get_reading()`,
 `ld2402_set_and_save_max_distance_m()`, and so on. Two additions worth knowing:
 
+- **Engineering mode is on by default and stays on**, same as the Arduino
+  version — a watchdog task puts it back within ~5 s if the module reboots on
+  its own, so still detection survives a module power blip untouched.
 - **`ld2402_reboot()`** restarts the module itself. Handy when it wedges;
   engineering mode and the threshold cache come back on their own.
 - **`reading.activity`** is `LD2402_ABSENT` / `MOVING` / `STILL` — the same
   single answer as the Arduino side's `activity()`. `presence`, `moving` and
   `still` are still in the struct (Home Assistant wants them as separate
-  entities), but all four are decided in one place, so they cannot disagree.
+  entities), but all four come from the module's one state byte, so they
+  cannot disagree.
 - **`ld2402_get_cached_*()`** return the driver's own copies of the
   thresholds, max range and disappear delay without touching the UART. The
   slow reads cost a config-mode session and a round trip per value — 32 of
   them for the full threshold set — which on a device serving a web UI is
   seconds of everything else being unanswerable. The cache is exact, not an
-  approximation: the moving/still classifier compares live energy against it
-  on every frame.
+  approximation, and it is what lets a write skip the module's flash when the
+  value asked for is already there.
 
 ### Config calls while the module is busy
 

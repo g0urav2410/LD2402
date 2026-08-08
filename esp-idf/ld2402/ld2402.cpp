@@ -249,43 +249,48 @@ static uint8_t s_body[200];
 static char s_lineBuf[40];
 static uint8_t s_lineLen = 0;
 
-// The module's `state` byte, raw. NOT an enum of none/moving/still -- that
-// is what this used to be read as, and it was wrong in both directions.
+// The module's `state` byte from the engineering frame. It IS the enum the
+// vendor manual (Table 5-7) documents:
 //
-// From the firmware reverse-engineering writeup (LD2402_firmware_RE.md
-// §9, §11c), the byte is built as:
+//     0x00 nobody, 0x01 someone moving, 0x02 someone still
+//
+// Measured, not assumed. This driver spent a long time believing otherwise:
+// the firmware reverse-engineering writeup (LD2402_firmware_RE.md §11c)
+// decompiled the frame builder as
 //
 //     state = presence;                 // 0 or 1
-//     if (<reporting sub-mode>) state += 0x10;
+//     if (...) state += 0x10;
 //
-// so the only values that ever appear on the wire are 0x00, 0x01, 0x10 and
-// 0x11. It never sends 2. Reading it as "1 = moving, 2 = still" therefore
-// meant:
-//   * 0x11 (present, sub-mode set) -> neither moving nor still, which the
-//     app renders as "Still" because that's its fallback. This is the
-//     "says still even when I'm moving", and the sub-mode flag toggling is
-//     the "it keeps changing between moving and still".
-//   * 0x10 (NOT present, sub-mode set) -> `!= 0`, so reported as presence.
-//     A false-presence bug hiding behind the same mistake.
+// and concluded only 0x00/0x01/0x10/0x11 could appear, never 0x02 -- so
+// moving/still had to be *derived* here by comparing per-gate energies
+// against per-gate thresholds. An entire classification layer was built on
+// that, plus a threshold cache to feed it and a degraded-mode fallback for
+// when the cache was cold.
 //
-// The same section is explicit that the moving/still distinction does not
-// survive into the module's presence output at all -- the merge is a plain
-// OR and only one presence bit comes out. So it cannot be recovered from
-// this byte by any masking. It has to be derived here, from the per-gate
-// energies against the per-gate thresholds, which is what the engineering
-// frame carries the two energy arrays for. That is also why every previous
-// attempt to make moving/still respond to threshold edits failed: nothing
-// was ever comparing them.
+// Logging the raw byte on hardware (module fw v3.3.5, serial
+// 26053356000016 -- the same version that writeup disassembled) showed
+// 0x00, 0x01 AND 0x02 in normal use, and never 0x10 or 0x11. The writeup is
+// wrong about the very build it analysed; it missed a code path. The manual
+// was right all along.
+//
+// So the classifier is gone and this byte is read directly. The module's own
+// still detector is a CIC/breathing filter over a long window (writeup §10) --
+// strictly better than the energy-vs-threshold compare that replaced it.
+//
+// If this is ever in doubt again: log the byte. Do not re-derive it from a
+// document, including this comment.
+#define LD2402_STATE_NOBODY 0x00
+#define LD2402_STATE_MOVING 0x01
+#define LD2402_STATE_STILL  0x02
 static uint8_t s_state = 0;
 static uint16_t s_distanceCm = 0;
 static bool s_engineering = false;
 static uint32_t s_energy[32] = {0};
 
-// Per-gate thresholds, mirrored here so publishReading() can classify
-// moving vs still without a UART round trip per frame (which would mean
-// entering config mode ~6 times a second and stalling the stream). Kept in
+// Per-gate thresholds, mirrored here so the write paths can skip a flash
+// write when nothing changed, without a UART round trip to check. Kept in
 // step by ld2402_cache_thresholds(), called after any read or write of
-// them. Invalid until the first read lands, and the classifier falls back
+// them. Invalid until the first read lands, and the writer falls back
 // to "presence means moving" while it is.
 static float s_trigger_th[16];
 static float s_motionless_th[16];
@@ -312,12 +317,14 @@ static void note_thresholds_progress(void) {
 
 // Throws away the cached copy of the module's 32 thresholds.
 //
-// Two things depend on that cache being true, and both fail silently when it
-// isn't: publishReading() classifies moving vs still by comparing live
-// energies against it, and the write paths below skip a flash write when the
-// value asked for matches what the cache says is already there. So a stale
-// cache means a misclassified room *and* threshold writes that get dropped as
-// redundant when they aren't.
+// The write paths below skip a flash write when the value asked for matches
+// what the cache says is already there, so a stale cache means real threshold
+// writes silently dropped as redundant.
+//
+// It used to matter twice over: publishReading() also classified moving vs
+// still against it. That classifier is gone (the module reports the answer
+// directly -- see the state-byte comment), so this is now purely a
+// write-deduplication cache. It still has to be invalidated correctly.
 //
 // Calibration and auto-gain both make it stale -- see their call sites.
 static void invalidate_threshold_cache(void) {
@@ -423,9 +430,7 @@ static int64_t s_lastUpdateUs = 0;
 
 static void publishReading() {
     ld2402_reading_t r;
-    // Low nibble only -- the 0x10 bit is the reporting sub-mode flag, not
-    // part of the presence value. See s_state's comment.
-    r.presence = (s_state & 0x0F) != 0;
+    r.presence = (s_state != LD2402_STATE_NOBODY);
     r.connected = true;   // ld2402_get_reading() recomputes this from staleness
     r.distance_cm = s_distanceCm;
     r.engineering = s_engineering;
@@ -434,55 +439,16 @@ static void publishReading() {
         r.motionless_db[i] = s_engineering ? dbFromRaw(s_energy[16 + i]) : NAN;
     }
 
-    // Moving vs still, derived here because the module doesn't report it.
+    // Moving vs still comes straight from the module. See the state-byte
+    // comment above for why this replaced a derived classifier.
     //
-    // Mirrors the module's own peak selection (RE writeup §8): scan gates
-    // 1..15 and take any gate whose energy clears that gate's threshold.
-    // Gate 0 is skipped for the same reason the module skips it -- its
-    // threshold is never evaluated, so including it would let near-field
-    // clutter set a flag no configuration change could ever clear.
-    //
-    // Both can be true at once: they are two filter chains over the same
-    // signal (fast clutter filter + 4-frame integration vs slow filter +
-    // 16-frame), not mutually exclusive states, so a real person usually
-    // lights up both. Callers that want one word for the UI should prefer
-    // `moving` -- see the note in radar.h.
-    // Presence is decided first, and absolutely: with nobody detected,
-    // "moving" is not a question worth asking. The gate scan used to run
-    // regardless, so a stray gate over threshold with no presence produced
-    // moving=true, presence=false, still=false -- a combination that cannot
-    // be true, and one no consumer of this struct could render sensibly.
-    r.moving = false;
-    if (!r.presence) {
-        // nothing to classify
-    } else if (s_engineering && s_thresholds_valid) {
-        for (uint8_t g = 1; g < 16; g++) {
-            if (!isnan(r.trigger_db[g]) && r.trigger_db[g] > s_trigger_th[g]) {
-                r.moving = true;
-                break;
-            }
-        }
-    } else {
-        // No engineering frame (module in ASCII mode) or thresholds not
-        // read back yet: presence is all we have, so report it as movement
-        // rather than inventing a classification. Guessing "still" here is
-        // what made a walking person read as stationary.
-        r.moving = true;
-    }
-
-    // Still is the complement of moving, not its own threshold test.
-    //
-    // Testing the motionless energies separately looks more principled and
-    // isn't: the two chains are the same signal under different filters, so
-    // both can clear their thresholds, neither can, or either alone can --
-    // giving four combinations for what is really a two-way question, and
-    // two of them ("present but neither" and "present and both") have no
-    // sensible thing to display. "Present but neither" is what a person
-    // sitting quietly actually produced here, and the app rendered it as
-    // "still" through a fallback anyway, which is the right answer arrived
-    // at by accident. Deriving it makes every state well-defined: something
-    // is there, and it is either moving or it isn't.
-    r.still = r.presence && !r.moving;
+    // In ASCII mode there is no state byte at all -- handleTextLine() can only
+    // set NOBODY or MOVING -- so a still person reads as moving there. That is
+    // a real limit of text mode, not a fallback worth writing code for: the
+    // driver keeps the module in engineering mode precisely so this does not
+    // happen.
+    r.moving = (s_state == LD2402_STATE_MOVING);
+    r.still  = (s_state == LD2402_STATE_STILL);
     // One value carrying the same decision, so callers that want a single
     // answer do not have to recombine the booleans and risk inventing a
     // fourth state that cannot occur.
@@ -497,7 +463,7 @@ static void handleTextLine(void) {
     // Trim trailing \r/space already excluded by feedByte(); just null-terminate.
     if (s_lineLen == 0) return;
     if (strcmp(s_lineBuf, "OFF") == 0) {
-        s_state = 0;
+        s_state = LD2402_STATE_NOBODY;
         s_distanceCm = 0;
         s_engineering = false;
         s_lastUpdateUs = esp_timer_get_time();
@@ -506,7 +472,9 @@ static void handleTextLine(void) {
     }
     const char *colon = strchr(s_lineBuf, ':');
     if (strncmp(s_lineBuf, "distance", 8) == 0 && colon) {
-        s_state = 1;
+        // Text mode reports presence and distance only -- there is no state
+        // byte, so a still person is indistinguishable from a moving one here.
+        s_state = LD2402_STATE_MOVING;
         s_distanceCm = (uint16_t)atoi(colon + 1);
         s_engineering = false;
         s_lastUpdateUs = esp_timer_get_time();
@@ -526,8 +494,34 @@ static void handleTextByte(uint8_t b) {
     else s_lineLen = 0;   // garbage/overlong line, drop it
 }
 
+// Raw frame capture -- see the note above the ld2402_debug_* declarations in
+// the header for why this is kept rather than removed once it had done its
+// job. Deliberately not mutex-guarded: a torn read costs a garbled hex line
+// in a diagnostic view, which is not worth a lock on the hot parse path.
+static uint32_t s_state_seen_mask = 0;
+static uint8_t s_last_frame[131];
+static uint16_t s_last_frame_len = 0;
+static uint32_t s_frame_count = 0;
+
+uint8_t ld2402_debug_raw_state(void) { return s_state; }
+uint32_t ld2402_debug_state_seen_mask(void) { return s_state_seen_mask; }
+uint32_t ld2402_debug_frame_count(void) { return s_frame_count; }
+
+uint16_t ld2402_debug_last_frame(uint8_t *out, uint16_t cap) {
+    uint16_t n = s_last_frame_len < cap ? s_last_frame_len : cap;
+    memcpy(out, s_last_frame, n);
+    return n;
+}
+
 static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
+    if (body[0] < 32) s_state_seen_mask |= (1u << body[0]);
+    {
+        uint16_t n = len < sizeof(s_last_frame) ? len : sizeof(s_last_frame);
+        memcpy(s_last_frame, body, n);
+        s_last_frame_len = n;
+        s_frame_count++;
+    }
     s_state = body[0];
     s_distanceCm = body[1] | ((uint16_t)body[2] << 8);
     s_engineering = true;
@@ -605,8 +599,8 @@ static void ld2402_task(void *arg) {
 // thresholds, which do survive (verified by pulling the sensor's power and
 // reading all 32 back unchanged). So a power blip on the module alone, with
 // the ESP32 still running, drops it back to plain text output: the energy
-// arrays stop, moving/still falls back to "presence means moving", and the
-// tuning screen shows its "engineering data is off" banner with no
+// arrays stop, the state byte disappears so a still person reads as moving,
+// and the tuning screen shows its "engineering data is off" banner with no
 // explanation of what happened. It had to be turned back on by hand.
 //
 // The desired state is whatever was last asked for through
@@ -706,9 +700,9 @@ static void engineering_watchdog_task(void *arg) {
 // This used to run once and delete itself, which was fine while nothing ever
 // dropped the cache. Now that calibration and auto-gain do -- they have to,
 // since both make the cached numbers wrong -- a one-shot task would leave
-// moving/still degraded from the first calibration until the next reboot.
-// So it stays resident and re-primes instead, which costs one sleeping task
-// and removes a whole class of "works until you calibrate" behaviour.
+// every later threshold write unable to dedupe, from the first calibration
+// until the next reboot. So it stays resident and re-primes instead, which
+// costs one sleeping task.
 //
 // It deliberately does nothing while a calibration is running: priming means
 // entering config mode, and the module is busy measuring the room.
@@ -731,8 +725,12 @@ static void threshold_cache_task(void *arg) {
         if (!ld2402_enable_config(2500)) {
             if (attempt == 5 && !announced) {
                 announced = true;
-                ESP_LOGW(TAG, "threshold cache unavailable -- moving/still degraded");
-                notify("could not read gate thresholds -- motion/still unreliable");
+                // Detection itself is unaffected -- the module classifies
+                // moving/still on its own. Without this cache the driver just
+                // can't skip redundant threshold writes, and the tuning screen
+                // has to do a slow read to show current values.
+                ESP_LOGW(TAG, "threshold cache unavailable -- writes won't dedupe");
+                notify("could not read gate thresholds -- settings writes will be slower");
             }
             continue;
         }
@@ -778,8 +776,8 @@ esp_err_t ld2402_init(const ld2402_config_t *cfg) {
                                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
     xTaskCreate(ld2402_task, "radar", 4096, nullptr, 5, nullptr);
-    // One-shot: fill the threshold cache so moving/still classification works
-    // from boot rather than only after someone opens the tuning screen. Its
+    // Fill the threshold cache from boot rather than only once someone opens
+    // the tuning screen, so the first settings write can already dedupe. Its
     // own task because it enters config mode, which blocks the stream for a
     // couple of seconds -- not something to do inline on the boot path.
     xTaskCreate(threshold_cache_task, "ld2402_th", 3072, nullptr, 3, nullptr);
@@ -1128,8 +1126,8 @@ bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_
 // the ESP's NVS, with no wear levelling anyone has documented. Tapping Save
 // twice in a row should not cost twice.
 //
-// Uses the same cache the moving/still classifier keeps in step, so this
-// costs a float comparison per gate. The cache is only trusted once every
+// Uses the driver's threshold cache, so this costs a float comparison per
+// gate rather than a UART read. The cache is only trusted once every
 // gate has been read back at least once; before that, write everything,
 // because "unknown" must never be mistaken for "unchanged".
 void ld2402_bulk_write_progress(int *done, int *total) {
@@ -1213,9 +1211,8 @@ bool ld2402_start_calibration(uint8_t triggerFactor, uint8_t holdFactor, uint8_t
     if (!waitAck(0x0009, timeoutMs)) return false;
     // Calibration rewrites all 32 thresholds inside the module, so every
     // cached copy here is now wrong. Nothing used to drop them, which left
-    // moving/still classified against pre-calibration numbers indefinitely,
-    // and left the no-op guards on the write paths comparing against values
-    // the module no longer holds -- silently skipping real writes.
+    // the no-op guards on the write paths comparing against values the module
+    // no longer holds -- silently skipping real writes.
     invalidate_threshold_cache();
     s_quiet_reason = "calibration";
     s_calibrating = true;

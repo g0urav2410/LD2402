@@ -51,8 +51,12 @@ void loop() {
 
     if (!radar.haveEnergyGates()) return;   // no engineering frame yet
 
-    Serial.printf("presence=%d moving=%d distance=%dcm\n",
-                   radar.presence(), radar.isMoving(), radar.distanceCm());
+    // The sensor reports moving vs still itself; the gate energies below are
+    // what it compares internally, shown here so you can see how close a
+    // reading sits to its threshold.
+    const char *what = radar.activity() == LD2402::Absent ? "empty"
+                     : radar.activity() == LD2402::Moving ? "moving" : "still";
+    Serial.printf("%s  distance=%dcm\n", what, radar.distanceCm());
     Serial.print("motion (dB):  ");
     for (int i = 0; i < 16; i++) Serial.printf("%.0f ", radar.motionEnergyDb(i));
     Serial.println();
