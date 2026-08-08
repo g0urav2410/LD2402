@@ -323,6 +323,32 @@ change, the wiring is fine but something's wrong with reading the data. If
 it stops climbing entirely, the sensor itself has gone quiet — check power
 and wiring.
 
+### Finding out *why* a call failed
+
+Every setting/calibration call returns `true` or `false`. `false` covers
+several different things, and they want opposite responses from you — so
+after a failed call, ask:
+
+```cpp
+if (!radar.setMaxDistanceM(8.5)) {
+    Serial.println(radar.lastErrorString());   // "timeout", "refused", ...
+}
+```
+
+| reason | what it means | what to do |
+|---|---|---|
+| `timeout` | the sensor is talking, but never sent this answer | try again |
+| `not_connected` | not one byte came back | check power and wiring |
+| `refused` | the sensor answered, and said no | the value was rejected |
+| `bad_arg` | out of range before it was even sent | fix the value |
+| `bad_reply` | an answer arrived, too garbled to use | try again |
+
+`lastError()` gives the same thing as an enum if you want to branch on it.
+
+Read it **immediately** after the call that failed — like `errno`, it isn't
+cleared when something succeeds, so checking it after a call that worked
+tells you about an older failure.
+
 ### Not freezing your display/animation while changing settings
 
 Every call above that changes a setting (thresholds, max distance,
@@ -403,6 +429,21 @@ when the module is unavailable, and treats two cases differently:
 
 So a caller does not need to know about any of this; it either succeeds or is
 told the module is busy.
+
+### Why a call failed
+
+Same idea as the Arduino driver's `lastErrorString()`, and the same warning
+about reading it straight away:
+
+```c
+if (!ld2402_set_max_distance_m(8.5f, 1000)) {
+    ESP_LOGW(TAG, "failed: %s", ld2402_err_str(ld2402_last_error()));
+}
+```
+
+`LD2402_ERR_BUSY` is the extra one here — this driver serialises config
+sessions across tasks, so "someone else is mid-session" is a real answer and
+means *retry shortly*, not *something is broken*.
 
 ### What the event callback reports
 

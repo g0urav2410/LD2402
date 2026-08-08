@@ -239,7 +239,40 @@ public:
     bool readParameterRaw(uint16_t id, uint32_t &value, uint16_t timeoutMs = 1000);
     bool setParameterRaw(uint16_t id, uint32_t value, uint16_t timeoutMs = 1000);
 
+    // ---- Why the last config/calibration call failed ----
+    //
+    // Every call above returns a plain bool, and for a long time that was all
+    // a caller got. But `false` covers several situations needing completely
+    // different responses -- retry, fix the value you passed, go and check the
+    // wiring -- and the driver knew which and threw it away.
+    //
+    // errno-style on purpose, rather than changing forty return types: the
+    // reason is recorded at the few places a call can actually fail, so every
+    // function gains it without its signature changing and without forcing any
+    // caller to care. Only meaningful straight after a call returned false --
+    // it is not cleared on success.
+    enum Error : uint8_t {
+        ERR_NONE = 0,
+        ERR_TIMEOUT,        // the module did not answer in time
+        ERR_REFUSED,        // the module answered, and said no
+        ERR_BAD_REPLY,      // an answer arrived, too short or malformed to use
+        ERR_BAD_ARG,        // the value asked for is out of range
+        ERR_NOT_CONNECTED,  // no bytes at all from the module -- power/wiring
+    };
+    Error lastError() const { return _lastErr; }
+    // "timeout", "refused", "bad_reply", "bad_arg", "not_connected", "ok".
+    static const char *errorString(Error e);
+    const char *lastErrorString() const { return errorString(_lastErr); }
+
 private:
+    Error _lastErr = ERR_NONE;
+    bool fail(Error e) { _lastErr = e; return false; }
+    // Counts bytes read during one exchange, so a failed wait can tell "the
+    // module said nothing at all" from "the module is talking but never sent
+    // the answer". Those look identical from a bool and want opposite
+    // reactions -- check the cable, versus try again.
+    uint32_t _exchangeBytes = 0;
+
     Stream *_serial = nullptr;
 
     // --- streaming parse state (text or engineering-binary, module picks one) ---

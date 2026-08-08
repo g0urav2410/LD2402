@@ -40,6 +40,42 @@ typedef enum {
     LD2402_STILL  = 2,
 } ld2402_activity_t;
 
+// Why the last config/calibration call failed.
+//
+// Every function in the "Config / calibration" section below returns a plain
+// bool, and for a long time that was all a caller got. But `false` covers at
+// least five situations that need completely different responses -- wait and
+// retry, retry now, fix the value you passed, go and check the wiring -- and
+// the driver knew which one it was and threw it away. A settings screen could
+// only ever say "Failed".
+//
+// Deliberately errno-style rather than changing forty return types: the reason
+// is recorded at the handful of places a call can actually fail (the mutexes,
+// the ACK wait, argument checks), so every function gets it without its
+// signature changing and without any caller being forced to care.
+typedef enum {
+    LD2402_OK = 0,
+    LD2402_ERR_BUSY,           // another config session or exchange is in progress
+    LD2402_ERR_TIMEOUT,        // the module did not answer in time
+    LD2402_ERR_REFUSED,        // the module answered, and said no
+    LD2402_ERR_BAD_REPLY,      // an answer arrived, too short or malformed to use
+    LD2402_ERR_BAD_ARG,        // the value asked for is out of range
+    LD2402_ERR_NOT_CONNECTED,  // no bytes at all from the module -- power/wiring
+} ld2402_err_t;
+
+// Why the most recent failed call failed.
+//
+// Only meaningful immediately after a call returned false -- like errno, it is
+// not cleared on success, so reading it after something worked tells you about
+// an older failure. Config calls are serialised by the session mutex, so the
+// value belongs to the call you just made.
+ld2402_err_t ld2402_last_error(void);
+
+// Short, stable, lowercase identifier for a reason: "busy", "timeout",
+// "refused", "bad_reply", "bad_arg", "not_connected", "ok". Suitable for
+// putting straight into a JSON error field.
+const char *ld2402_err_str(ld2402_err_t err);
+
 // Notification hook for things the sensor does on its own -- going silent,
 // coming back, having its engineering mode restored after it rebooted itself.
 // Optional; leave it null and these are only ESP_LOG lines. The string is

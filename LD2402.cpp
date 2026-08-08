@@ -164,9 +164,22 @@ void LD2402::sendCommand(uint16_t word, const uint8_t *value, uint16_t valueLen)
 // connected() during/right after a config-mode session (which can run
 // several seconds for a bulk save) would see it as stale even though the
 // sensor was actively exchanging ACKs the whole time.
+const char *LD2402::errorString(Error e) {
+    switch (e) {
+        case ERR_NONE:          return "ok";
+        case ERR_TIMEOUT:       return "timeout";
+        case ERR_REFUSED:       return "refused";
+        case ERR_BAD_REPLY:     return "bad_reply";
+        case ERR_BAD_ARG:       return "bad_arg";
+        case ERR_NOT_CONNECTED: return "not_connected";
+    }
+    return "unknown";
+}
+
 uint8_t LD2402::readByteTracked() {
     uint8_t b = (uint8_t)_serial->read();
     _byteCount++;
+    _exchangeBytes++;
     _lastByteMs = millis();
     return b;
 }
@@ -237,14 +250,20 @@ bool LD2402::readFrameBlocking(uint16_t &word, uint8_t *body, uint16_t &bodyLen,
 bool LD2402::waitAck(uint16_t word, uint16_t timeoutMs, uint8_t *extra, uint16_t extraCap, uint16_t *extraLen) {
     uint16_t wantWord = word + 0x0100;
     unsigned long start = millis();
+    const uint32_t bytesAtStart = _exchangeBytes;
+    // Silence and noise are different faults: if not one byte arrived while we
+    // waited, the module is not talking to us at all.
+    #define LD2402_QUIET() fail(_exchangeBytes == bytesAtStart ? ERR_NOT_CONNECTED : ERR_TIMEOUT)
     while ((uint16_t)(millis() - start) < timeoutMs) {
         uint16_t gotWord, bodyLen;
         uint16_t remaining = timeoutMs - (uint16_t)(millis() - start);
-        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return false;
+        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return LD2402_QUIET();
         if (gotWord != wantWord) continue; // stray frame (e.g. an unsolicited event), keep waiting
-        if (bodyLen < 2) return false;
+        if (bodyLen < 2) return fail(ERR_BAD_REPLY);
         uint16_t status = _body[0] | ((uint16_t)_body[1] << 8);
-        if (status != 0) return false;
+        // The module answered the right command and said no. Retrying will not
+        // change that -- the value asked for was rejected.
+        if (status != 0) return fail(ERR_REFUSED);
         if (extra && extraLen) {
             uint16_t n = bodyLen - 2;
             if (n > extraCap) n = extraCap;
@@ -253,19 +272,21 @@ bool LD2402::waitAck(uint16_t word, uint16_t timeoutMs, uint8_t *extra, uint16_t
         }
         return true;
     }
-    return false;
+    return LD2402_QUIET();
 }
 
 bool LD2402::waitEvent(uint16_t word, uint16_t timeoutMs) {
     unsigned long start = millis();
+    const uint32_t bytesAtStart = _exchangeBytes;
     while ((uint16_t)(millis() - start) < timeoutMs) {
         uint16_t gotWord, bodyLen;
         uint16_t remaining = timeoutMs - (uint16_t)(millis() - start);
-        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return false;
+        if (!readFrameBlocking(gotWord, _body, bodyLen, sizeof(_body), remaining)) return LD2402_QUIET();
         if (gotWord == word) return true;
     }
-    return false;
+    return LD2402_QUIET();
 }
+#undef LD2402_QUIET
 
 bool LD2402::enableConfig(uint16_t timeoutMs) {
     // Deadline-based hammering, not a fixed 3 tries. Breaking into config mode
@@ -308,7 +329,8 @@ bool LD2402::readFirmwareVersion(String &out, uint16_t timeoutMs) {
     sendCommand(0x0000, nullptr, 0);
     uint8_t extra[64];
     uint16_t n = 0;
-    if (!waitAck(0x0000, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x0000, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(ERR_BAD_REPLY);
     uint16_t verLen = extra[0] | ((uint16_t)extra[1] << 8);
     if (verLen > n - 2) verLen = n - 2;
     out = "";
@@ -320,7 +342,8 @@ bool LD2402::readSerialNumber(String &out, uint16_t timeoutMs) {
     sendCommand(0x0011, nullptr, 0);
     uint8_t extra[40];
     uint16_t n = 0;
-    if (!waitAck(0x0011, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x0011, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(ERR_BAD_REPLY);
     uint16_t snLen = extra[0] | ((uint16_t)extra[1] << 8);
     if (snLen > n - 2) snLen = n - 2;
     out = "";
@@ -370,7 +393,8 @@ bool LD2402::readParameterRaw(uint16_t id, uint32_t &value, uint16_t timeoutMs) 
     sendCommand(0x0008, val, 2);
     uint8_t extra[4];
     uint16_t n = 0;
-    if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &n) || n < 4) return false;
+    if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 4) return fail(ERR_BAD_REPLY);
     value = (uint32_t)extra[0] | ((uint32_t)extra[1] << 8) | ((uint32_t)extra[2] << 16) | ((uint32_t)extra[3] << 24);
     return true;
 }
@@ -437,13 +461,13 @@ bool LD2402::setAndSaveDisappearDelaySec(uint16_t seconds, uint16_t configTimeou
 }
 
 bool LD2402::setTriggerThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     if (!setParameterRaw(0x0010 + gate, rawFromDb(db), timeoutMs)) return false;
     _triggerTh[gate] = db;   // mirror into the classifier cache -- see isMoving()
     return true;
 }
 bool LD2402::readTriggerThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     uint32_t raw;
     if (!readParameterRaw(0x0010 + gate, raw, timeoutMs)) return false;
     db = dbFromRaw(raw);
@@ -453,13 +477,13 @@ bool LD2402::readTriggerThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs)
     return true;
 }
 bool LD2402::setMotionlessThresholdDb(uint8_t gate, float db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     if (!setParameterRaw(0x0030 + gate, rawFromDb(db), timeoutMs)) return false;
     _motionlessTh[gate] = db;
     return true;
 }
 bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     uint32_t raw;
     if (!readParameterRaw(0x0030 + gate, raw, timeoutMs)) return false;
     db = dbFromRaw(raw);
@@ -470,7 +494,7 @@ bool LD2402::readMotionlessThresholdDb(uint8_t gate, float &db, uint16_t timeout
 }
 
 bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     // Bail out instead of pressing on: with config mode never entered,
     // every command below waits out its full timeout for an ACK that
     // cannot come, and endConfig() then burns three more retries. The
@@ -483,7 +507,7 @@ bool LD2402::setAndSaveTriggerThresholdDb(uint8_t gate, float db, uint16_t confi
 }
 
 bool LD2402::setAndSaveMotionlessThresholdDb(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(ERR_BAD_ARG);
     // Bail out instead of pressing on: with config mode never entered,
     // every command below waits out its full timeout for an ACK that
     // cannot come, and endConfig() then burns three more retries. The
@@ -539,7 +563,8 @@ bool LD2402::calibrationProgress(uint8_t &percent, uint16_t timeoutMs) {
     sendCommand(0x000A, nullptr, 0);
     uint8_t extra[2];
     uint16_t n = 0;
-    if (!waitAck(0x000A, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x000A, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(ERR_BAD_REPLY);
     percent = extra[0]; // percentage fits in one byte (0-100), extra[1] is always 0
     return true;
 }

@@ -90,6 +90,32 @@ static SemaphoreHandle_t s_uart_mutex;
 // enable/.../end sequence, so this falls out for free once those two hold it.
 static SemaphoreHandle_t s_session_mutex;
 
+// Why the last failed call failed. See the note above ld2402_err_t in the
+// header for why this is errno-style rather than a changed return type.
+//
+// Written only on a failure path and never cleared, so it is meaningful only
+// straight after a call returned false. Not mutex-guarded: config calls are
+// already serialised by s_session_mutex, and a plain enum store is atomic on
+// this target, so a lock here would protect nothing that isn't protected.
+static ld2402_err_t s_last_err = LD2402_OK;
+
+static bool fail(ld2402_err_t err) { s_last_err = err; return false; }
+
+ld2402_err_t ld2402_last_error(void) { return s_last_err; }
+
+const char *ld2402_err_str(ld2402_err_t err) {
+    switch (err) {
+        case LD2402_OK:                return "ok";
+        case LD2402_ERR_BUSY:          return "busy";
+        case LD2402_ERR_TIMEOUT:       return "timeout";
+        case LD2402_ERR_REFUSED:       return "refused";
+        case LD2402_ERR_BAD_REPLY:     return "bad_reply";
+        case LD2402_ERR_BAD_ARG:       return "bad_arg";
+        case LD2402_ERR_NOT_CONNECTED: return "not_connected";
+    }
+    return "unknown";
+}
+
 static void setReading(const ld2402_reading_t &r) {
     xSemaphoreTake(s_reading_lock, portMAX_DELAY);
     s_reading = r;
@@ -125,8 +151,17 @@ void ld2402_get_reading(ld2402_reading_t *out) {
 // ---------------------------------------------------------------------------
 // Raw UART helpers. Caller must already hold s_uart_mutex.
 // ---------------------------------------------------------------------------
+// Counts every byte read during a config exchange, so a failed wait can tell
+// "the module said nothing at all" (dead, unpowered, TX not landing on our RX)
+// apart from "the module is talking but never sent the answer". Those look
+// identical from a bool and want opposite reactions -- check the cable, versus
+// try again. Only touched under s_uart_mutex.
+static uint32_t s_exchangeBytes = 0;
+
 static bool uartReadByte(uint8_t *b, TickType_t timeout) {
-    return uart_read_bytes(UART_PORT, b, 1, timeout) == 1;
+    if (uart_read_bytes(UART_PORT, b, 1, timeout) != 1) return false;
+    s_exchangeBytes++;
+    return true;
 }
 
 static void uartWrite(const uint8_t *buf, size_t len) {
@@ -207,14 +242,23 @@ static bool waitAck(uint16_t word, uint16_t timeoutMs,
     uint16_t wantWord = word + 0x0100;
     int64_t deadline = esp_timer_get_time() + (int64_t)timeoutMs * 1000;
     static uint8_t body[200];
+    const uint32_t bytesAtStart = s_exchangeBytes;
+    // Silence and noise are different faults. If not one byte arrived while we
+    // waited, the module is not talking to us at all.
+    auto quiet = [&]() {
+        return fail(s_exchangeBytes == bytesAtStart ? LD2402_ERR_NOT_CONNECTED
+                                                    : LD2402_ERR_TIMEOUT);
+    };
     while (esp_timer_get_time() < deadline) {
         uint16_t gotWord, bodyLen;
         uint16_t remaining = (uint16_t)((deadline - esp_timer_get_time()) / 1000);
-        if (!readFrameBlocking(gotWord, body, bodyLen, sizeof(body), remaining)) return false;
+        if (!readFrameBlocking(gotWord, body, bodyLen, sizeof(body), remaining)) return quiet();
         if (gotWord != wantWord) continue;   // stray frame, keep waiting
-        if (bodyLen < 2) return false;
+        if (bodyLen < 2) return fail(LD2402_ERR_BAD_REPLY);
         uint16_t status = body[0] | ((uint16_t)body[1] << 8);
-        if (status != 0) return false;
+        // The module answered the right command and said no. Nothing about
+        // retrying will change that -- the value asked for was rejected.
+        if (status != 0) return fail(LD2402_ERR_REFUSED);
         if (extra && extraLen) {
             uint16_t n = bodyLen - 2;
             if (n > extraCap) n = extraCap;
@@ -223,19 +267,24 @@ static bool waitAck(uint16_t word, uint16_t timeoutMs,
         }
         return true;
     }
-    return false;
+    return quiet();
 }
 
 static bool waitEvent(uint16_t word, uint16_t timeoutMs) {
     int64_t deadline = esp_timer_get_time() + (int64_t)timeoutMs * 1000;
     static uint8_t body[200];
+    const uint32_t bytesAtStart = s_exchangeBytes;
+    auto quiet = [&]() {
+        return fail(s_exchangeBytes == bytesAtStart ? LD2402_ERR_NOT_CONNECTED
+                                                    : LD2402_ERR_TIMEOUT);
+    };
     while (esp_timer_get_time() < deadline) {
         uint16_t gotWord, bodyLen;
         uint16_t remaining = (uint16_t)((deadline - esp_timer_get_time()) / 1000);
-        if (!readFrameBlocking(gotWord, body, bodyLen, sizeof(body), remaining)) return false;
+        if (!readFrameBlocking(gotWord, body, bodyLen, sizeof(body), remaining)) return quiet();
         if (gotWord == word) return true;
     }
-    return false;
+    return quiet();
 }
 
 // ---------------------------------------------------------------------------
@@ -808,7 +857,7 @@ bool ld2402_enable_config(uint16_t timeoutMs) {
     //   just finished  -> wait, but briefly. The gap is a few seconds and the
     //                     caller almost certainly wants the write to land
     //                     rather than to be told to try again.
-    if (s_calibrating || s_autogain_running) return false;
+    if (s_calibrating || s_autogain_running) return fail(LD2402_ERR_BUSY);
 
     const int64_t wait_until =
         (s_busy_until_us < esp_timer_get_time() + 6000000LL) ? s_busy_until_us
@@ -821,10 +870,11 @@ bool ld2402_enable_config(uint16_t timeoutMs) {
     // s_session_mutex comment above. If the handshake below never succeeds,
     // release it before returning; nothing will call end_config to do it for
     // us, and leaking it would starve every future config call forever.
-    if (xSemaphoreTake(s_session_mutex, pdMS_TO_TICKS((uint32_t)timeoutMs + 1000)) != pdTRUE) return false;
+    if (xSemaphoreTake(s_session_mutex, pdMS_TO_TICKS((uint32_t)timeoutMs + 1000)) != pdTRUE)
+        return fail(LD2402_ERR_BUSY);
 
     UartSession s;
-    if (!s.held) { xSemaphoreGive(s_session_mutex); return false; }
+    if (!s.held) { xSemaphoreGive(s_session_mutex); return fail(LD2402_ERR_BUSY); }
 
     // Deadline-based hammering, not a fixed handful of tries -- see the long
     // comment in the original driver (LD2402.cpp) for why: breaking into
@@ -893,11 +943,13 @@ bool ld2402_end_config(uint16_t timeoutMs) {
 
 bool ld2402_read_firmware_version(char *buf, size_t cap, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held || cap == 0) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
+    if (cap == 0) return fail(LD2402_ERR_BAD_ARG);
     sendCommand(0x0000, nullptr, 0);
     uint8_t extra[64];
     uint16_t n = 0;
-    if (!waitAck(0x0000, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x0000, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(LD2402_ERR_BAD_REPLY);
     uint16_t verLen = extra[0] | ((uint16_t)extra[1] << 8);
     if (verLen > n - 2) verLen = n - 2;
     if (verLen > cap - 1) verLen = cap - 1;
@@ -908,11 +960,13 @@ bool ld2402_read_firmware_version(char *buf, size_t cap, uint16_t timeoutMs) {
 
 bool ld2402_read_serial_number(char *buf, size_t cap, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held || cap == 0) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
+    if (cap == 0) return fail(LD2402_ERR_BAD_ARG);
     sendCommand(0x0011, nullptr, 0);
     uint8_t extra[40];
     uint16_t n = 0;
-    if (!waitAck(0x0011, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x0011, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(LD2402_ERR_BAD_REPLY);
     uint16_t snLen = extra[0] | ((uint16_t)extra[1] << 8);
     if (snLen > n - 2) snLen = n - 2;
     if (snLen > cap - 1) snLen = cap - 1;
@@ -923,7 +977,7 @@ bool ld2402_read_serial_number(char *buf, size_t cap, uint16_t timeoutMs) {
 
 bool ld2402_set_output_mode(bool engineering, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     uint32_t mode = engineering ? 0x00000004 : 0x00000064;
     // Value field is SIX bytes: 2-byte command value (always 0) + 4-byte mode
     // (manual 5.2.8). Sending only 4 bytes made a malformed frame that left
@@ -956,12 +1010,13 @@ bool ld2402_set_engineering_mode(bool on, uint16_t configTimeoutMs) {
 
 bool ld2402_read_parameter_raw(uint16_t id, uint32_t *value, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     uint8_t val[2] = {(uint8_t)(id & 0xFF), (uint8_t)(id >> 8)};
     sendCommand(0x0008, val, 2);
     uint8_t extra[4];
     uint16_t n = 0;
-    if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &n) || n < 4) return false;
+    if (!waitAck(0x0008, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 4) return fail(LD2402_ERR_BAD_REPLY);
     *value = (uint32_t)extra[0] | ((uint32_t)extra[1] << 8) | ((uint32_t)extra[2] << 16) | ((uint32_t)extra[3] << 24);
     return true;
 }
@@ -976,9 +1031,9 @@ bool ld2402_read_parameter_raw(uint16_t id, uint32_t *value, uint16_t timeoutMs)
 // callers just ask for what they want.
 bool ld2402_read_parameters_raw(const uint16_t *ids, uint32_t *values,
                                  uint8_t count, uint16_t timeoutMs) {
-    if (!ids || !values || count == 0) return false;
+    if (!ids || !values || count == 0) return fail(LD2402_ERR_BAD_ARG);
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
 
     const uint8_t perFrame = (uint8_t)(s_cmd_bufsize / 2);   // 2 bytes per id
     uint8_t done = 0;
@@ -999,7 +1054,7 @@ bool ld2402_read_parameters_raw(const uint16_t *ids, uint32_t *values,
         // Short reply means the module answered fewer than asked. Treating a
         // partial answer as success would hand back stale stack contents for
         // the rest, which is worse than failing.
-        if (got < (uint16_t)(n * 4)) return false;
+        if (got < (uint16_t)(n * 4)) return fail(LD2402_ERR_BAD_REPLY);
 
         for (uint8_t i = 0; i < n; i++) {
             const uint8_t *p = extra + i * 4;
@@ -1016,9 +1071,9 @@ bool ld2402_read_parameters_raw(const uint16_t *ids, uint32_t *values,
 // the read side.
 bool ld2402_set_parameters_raw(const uint16_t *ids, const uint32_t *values,
                                 uint8_t count, uint16_t timeoutMs) {
-    if (!ids || !values || count == 0) return false;
+    if (!ids || !values || count == 0) return fail(LD2402_ERR_BAD_ARG);
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
 
     const uint8_t perFrame = (uint8_t)(s_cmd_bufsize / 6);   // 6 bytes per record
     uint8_t done = 0;
@@ -1047,7 +1102,7 @@ bool ld2402_set_parameters_raw(const uint16_t *ids, const uint32_t *values,
 
 bool ld2402_set_parameter_raw(uint16_t id, uint32_t value, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     uint8_t val[6] = {
         (uint8_t)(id & 0xFF), (uint8_t)(id >> 8),
         (uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
@@ -1128,7 +1183,7 @@ bool ld2402_set_and_save_disappear_delay_s(uint16_t seconds, uint16_t configTime
 }
 
 bool ld2402_set_trigger_threshold_db(uint8_t gate, float db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     if (!ld2402_set_parameter_raw(0x0010 + gate, rawFromDb(db), timeoutMs)) return false;
     // Mirror into the classifier's cache. Doing it in the primitives means
     // every path -- single gate write, bulk save, calibration read-back --
@@ -1137,7 +1192,7 @@ bool ld2402_set_trigger_threshold_db(uint8_t gate, float db, uint16_t timeoutMs)
     return true;
 }
 bool ld2402_read_trigger_threshold_db(uint8_t gate, float *db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     uint32_t raw;
     if (!ld2402_read_parameter_raw(0x0010 + gate, &raw, timeoutMs)) return false;
     *db = dbFromRaw(raw);
@@ -1147,13 +1202,13 @@ bool ld2402_read_trigger_threshold_db(uint8_t gate, float *db, uint16_t timeoutM
     return true;
 }
 bool ld2402_set_motionless_threshold_db(uint8_t gate, float db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     if (!ld2402_set_parameter_raw(0x0030 + gate, rawFromDb(db), timeoutMs)) return false;
     s_motionless_th[gate] = db;
     return true;
 }
 bool ld2402_read_motionless_threshold_db(uint8_t gate, float *db, uint16_t timeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     uint32_t raw;
     if (!ld2402_read_parameter_raw(0x0030 + gate, &raw, timeoutMs)) return false;
     *db = dbFromRaw(raw);
@@ -1164,7 +1219,7 @@ bool ld2402_read_motionless_threshold_db(uint8_t gate, float *db, uint16_t timeo
 }
 
 bool ld2402_set_and_save_trigger_threshold_db(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     if (s_thresholds_valid && fabsf(s_trigger_th[gate] - db) < 0.05f) return true;
     // Bail if config mode was refused. Ignoring this meant the commands
     // below were sent to a module that was not listening: every one of
@@ -1179,7 +1234,7 @@ bool ld2402_set_and_save_trigger_threshold_db(uint8_t gate, float db, uint16_t c
 }
 
 bool ld2402_set_and_save_motionless_threshold_db(uint8_t gate, float db, uint16_t configTimeoutMs, uint16_t saveTimeoutMs) {
-    if (gate > 15) return false;
+    if (gate > 15) return fail(LD2402_ERR_BAD_ARG);
     if (s_thresholds_valid && fabsf(s_motionless_th[gate] - db) < 0.05f) return true;
     // Bail if config mode was refused. Ignoring this meant the commands
     // below were sent to a module that was not listening: every one of
@@ -1347,7 +1402,7 @@ bool ld2402_read_power_interference(uint8_t *status, uint16_t timeoutMs) {
 
 bool ld2402_start_calibration(uint8_t triggerFactor, uint8_t holdFactor, uint8_t microFactor, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     uint16_t trig = (uint16_t)triggerFactor * 10, hold = (uint16_t)holdFactor * 10, micro = (uint16_t)microFactor * 10;
     uint8_t val[6] = {
         (uint8_t)trig, (uint8_t)(trig >> 8),
@@ -1367,11 +1422,12 @@ bool ld2402_start_calibration(uint8_t triggerFactor, uint8_t holdFactor, uint8_t
 
 bool ld2402_calibration_progress(uint8_t *percent, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     sendCommand(0x000A, nullptr, 0);
     uint8_t extra[2];
     uint16_t n = 0;
-    if (!waitAck(0x000A, timeoutMs, extra, sizeof(extra), &n) || n < 2) return false;
+    if (!waitAck(0x000A, timeoutMs, extra, sizeof(extra), &n)) return false;
+    if (n < 2) return fail(LD2402_ERR_BAD_REPLY);
     *percent = extra[0];   // fits in one byte (0-100); extra[1] is always 0
     // Releases threshold_cache_task to go and re-read the thresholds the
     // calibration just rewrote. Polling this to completion is what every
@@ -1386,7 +1442,7 @@ bool ld2402_calibration_progress(uint8_t *percent, uint16_t timeoutMs) {
 
 bool ld2402_read_calibration_interference(bool *hadInterference, uint16_t *gateMask, uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     sendCommand(0x0014, nullptr, 0);
     const uint16_t wantWord = 0x0014 + 0x0100;
     int64_t deadline = esp_timer_get_time() + (int64_t)timeoutMs * 1000;
@@ -1396,18 +1452,18 @@ bool ld2402_read_calibration_interference(bool *hadInterference, uint16_t *gateM
         uint16_t remaining = (uint16_t)((deadline - esp_timer_get_time()) / 1000);
         if (!readFrameBlocking(gotWord, body, bodyLen, sizeof(body), remaining)) return false;
         if (gotWord != wantWord) continue;   // stray frame, keep waiting
-        if (bodyLen < 4) return false;
+        if (bodyLen < 4) return fail(LD2402_ERR_BAD_REPLY);
         uint16_t status = body[0] | ((uint16_t)body[1] << 8);
         *gateMask = body[2] | ((uint16_t)body[3] << 8);
         *hadInterference = (status != 0);
         return true;
     }
-    return false;
+    return fail(LD2402_ERR_TIMEOUT);
 }
 
 bool ld2402_save_parameters(uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
 
     // Retried, because this is the one command whose failure is silent and
     // expensive. 0x00FD only *requests* the commit -- the module's main loop
@@ -1439,7 +1495,7 @@ bool ld2402_save_parameters(uint16_t timeoutMs) {
 // thresholds. Nothing else has to be done by the caller.
 bool ld2402_reboot(uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     sendCommand(0x00EF, nullptr, 0);
     if (!waitAck(0x00EF, timeoutMs)) return false;
     invalidate_threshold_cache();
@@ -1452,7 +1508,7 @@ bool ld2402_reboot(uint16_t timeoutMs) {
 
 bool ld2402_start_auto_gain(uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     sendCommand(0x00EE, nullptr, 0);
     if (!waitAck(0x00EE, timeoutMs)) return false;
     s_quiet_reason = "gain adjustment";
@@ -1466,7 +1522,7 @@ bool ld2402_start_auto_gain(uint16_t timeoutMs) {
 
 bool ld2402_auto_gain_done(uint16_t timeoutMs) {
     UartSession s;
-    if (!s.held) return false;
+    if (!s.held) return fail(LD2402_ERR_BUSY);
     // The module pushes this unprompted (word 0x00F0, not a +0x0100 ACK) once
     // auto-gain finishes -- not a reply to a request we send.
     const bool done = waitEvent(0x00F0, timeoutMs);
