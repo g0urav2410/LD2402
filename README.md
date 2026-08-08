@@ -488,8 +488,12 @@ document — including this one.
 These are all confirmed against hardware, and all of them will look like bugs
 in your own code if you don't know about them:
 
-- **Gate 0 is dead.** The module never evaluates it, so nothing closer than
-  ~0.7 m is detectable and no setting changes that.
+- **Gate 0 may or may not be evaluated.** The disassembly says the module
+  never looks at it, so nothing closer than ~0.7 m is detectable. The manual
+  says no such thing — it lists thresholds for all 16 gates with no
+  exception — and readings around 0.3 m have been observed on real hardware,
+  which the claim does not allow. Treat gate 0 as a normal gate until someone
+  measures otherwise.
 - **Deep-stillness only covers gates 4–7** (about 2.8–4.9 m). Hard-wired.
   Outside that band you get motion detection only.
 - **Leaving config mode does not save anything.** Values written without an
