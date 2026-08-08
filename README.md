@@ -135,29 +135,6 @@ That's deliberate: holding the last reading forever means an unplugged sensor
 still insists someone is in the room. Use `connected()` if you need to tell
 "nobody's there" apart from "the sensor is gone".
 
-## Where moving/still comes from
-
-The sensor decides it, and this library just reports what it says. Worth
-knowing because getting this wrong cost a lot of time.
-
-Each frame's first byte is the answer: `0` nobody, `1` moving, `2` still.
-That matches the vendor manual, and it is what a real module sends.
-
-A firmware disassembly of the module once concluded that byte could only ever
-be `0` or `1` — that the moving/still distinction was destroyed inside the
-chip before transmission. This library believed that, and rebuilt the answer
-itself by comparing per-gate signal levels against per-gate thresholds.
-Logging the raw byte on real hardware (firmware v3.3.5 — the *same* version
-the disassembly examined) showed `2` arriving in ordinary use. The
-disassembly had missed a code path.
-
-That derived classifier is gone. The sensor's own still detector is a
-long-window filter sensitive enough to pick up breathing; nothing built from
-threshold comparisons was going to match it.
-
-**If you ever doubt this: log the byte.** Don't re-derive it from a document,
-including this one.
-
 ### "Still" never triggers — what to check
 
 1. **Engineering mode off.** Check `haveEnergyGates()`. `loop()` turns it on
@@ -461,12 +438,75 @@ Look in the `examples/` folder for ready-to-run sketches:
 - **NonBlockingUI** — how to change settings on the sensor without freezing
   the rest of your sketch (a display, an animation, etc.) while it does so
 
-## Something not covered here?
+---
 
-This file only covers everyday use. If you want to understand *why* the
-library works the way it does — quirks of the sensor itself, timing details,
-raw protocol bytes — see `trash/README.old.*.md`, which has the full
-engineering writeup.
+# Under the hood
+
+Everything above is what you need to use the sensor. This part is why the
+library is built the way it is — worth reading if something surprises you, or
+before changing how detection works.
+
+## Where moving/still actually comes from
+
+The sensor decides it. This library just reports what it says.
+
+Each engineering frame's first byte is the answer: `0` nobody, `1` moving,
+`2` still. That is what the vendor manual documents, and what a real module
+sends.
+
+**This library spent a long time believing otherwise, and it is worth knowing
+why.** A disassembly of the module's own firmware decompiled the code that
+builds that byte as:
+
+```c
+state = presence;          // 0 or 1
+if (...) state += 0x10;
+```
+
+From which it followed that `0x02` could never appear — that the moving/still
+distinction was merged away inside the chip before transmission and was
+unrecoverable. So the library rebuilt the answer itself: cache all 32 per-gate
+thresholds, compare live energies against them every frame, call it Moving if
+any gate cleared.
+
+Then someone logged the byte on real hardware. Module firmware **v3.3.5** —
+the same version that disassembly examined — sends `0x00`, `0x01` **and
+`0x02`** in ordinary use, and never `0x10` or `0x11`. The analysis had missed
+a code path. The manual had been right the whole time.
+
+The derived classifier is gone. The sensor's own still detector is a
+long-window filter sensitive enough to pick up breathing; nothing assembled
+out of threshold comparisons was going to match it.
+
+**If this is ever in doubt again: log the byte.** Raise this component's log
+level to `DEBUG` and every frame is dumped as hex, or read
+`ld2402_debug_raw_state()` on the ESP-IDF side. Do not re-derive it from a
+document — including this one.
+
+## Sensor quirks worth knowing
+
+These are all confirmed against hardware, and all of them will look like bugs
+in your own code if you don't know about them:
+
+- **Gate 0 is dead.** The module never evaluates it, so nothing closer than
+  ~0.7 m is detectable and no setting changes that.
+- **Deep-stillness only covers gates 4–7** (about 2.8–4.9 m). Hard-wired.
+  Outside that band you get motion detection only.
+- **Leaving config mode does not save anything.** Values written without an
+  explicit save read back fine, then vanish on the next power cycle. The
+  `setAndSave*` calls handle this for you.
+- **Output mode is not persistent.** After the module loses power it is back
+  in text mode. `loop()` puts it back.
+- **The still threshold is adaptive** — roughly 100× a running average of
+  motion energy in the same gate — so nearby movement desensitises stillness
+  detection in that gate. Not configurable.
+- **Reported distance is quantised** to multiples of 70 cm by the tracker,
+  and lags one measurement cycle behind.
+
+## The full protocol writeup
+
+For frame layouts, command tables, timing, and the reverse-engineering work
+these findings came from, see `trash/README.old.*.md`.
 
 ## License
 

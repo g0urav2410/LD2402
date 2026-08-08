@@ -494,34 +494,14 @@ static void handleTextByte(uint8_t b) {
     else s_lineLen = 0;   // garbage/overlong line, drop it
 }
 
-// Raw frame capture -- see the note above the ld2402_debug_* declarations in
-// the header for why this is kept rather than removed once it had done its
-// job. Deliberately not mutex-guarded: a torn read costs a garbled hex line
-// in a diagnostic view, which is not worth a lock on the hot parse path.
-static uint32_t s_state_seen_mask = 0;
-static uint8_t s_last_frame[131];
-static uint16_t s_last_frame_len = 0;
-static uint32_t s_frame_count = 0;
-
 uint8_t ld2402_debug_raw_state(void) { return s_state; }
-uint32_t ld2402_debug_state_seen_mask(void) { return s_state_seen_mask; }
-uint32_t ld2402_debug_frame_count(void) { return s_frame_count; }
-
-uint16_t ld2402_debug_last_frame(uint8_t *out, uint16_t cap) {
-    uint16_t n = s_last_frame_len < cap ? s_last_frame_len : cap;
-    memcpy(out, s_last_frame, n);
-    return n;
-}
 
 static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
-    if (body[0] < 32) s_state_seen_mask |= (1u << body[0]);
-    {
-        uint16_t n = len < sizeof(s_last_frame) ? len : sizeof(s_last_frame);
-        memcpy(s_last_frame, body, n);
-        s_last_frame_len = n;
-        s_frame_count++;
-    }
+    // The whole frame at debug level, for when the decoded reading and the
+    // hardware disagree. Off unless this component's log level is raised, so
+    // it costs a level check per frame the rest of the time.
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, body, len, ESP_LOG_DEBUG);
     s_state = body[0];
     s_distanceCm = body[1] | ((uint16_t)body[2] << 8);
     s_engineering = true;
