@@ -1114,6 +1114,61 @@ bool ld2402_set_parameter_raw(uint16_t id, uint32_t value, uint16_t timeoutMs) {
     return waitAck(0x0007, timeoutMs);
 }
 
+// ---------------------------------------------------------------------------
+// Raw UART bridge -- see the block comment in ld2402.h.
+// ---------------------------------------------------------------------------
+
+static volatile bool s_bridge = false;
+
+bool ld2402_bridge_active(void) { return s_bridge; }
+
+bool ld2402_bridge_begin(uint32_t baud, uint16_t timeoutMs) {
+    if (s_bridge) return false;
+    // Taken and deliberately NOT given back until bridge_end(). Holding it is
+    // the whole mechanism: every other path to the UART in this file goes
+    // through the same mutex, so one take silences all of them at once
+    // without a flag each of them has to remember to check.
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE)
+        return fail(LD2402_ERR_BUSY);
+    if (uart_set_baudrate(UART_PORT, baud) != ESP_OK) {
+        xSemaphoreGive(s_uart_mutex);
+        return fail(LD2402_ERR_BAD_ARG);
+    }
+    uart_flush_input(UART_PORT);
+    s_bridge = true;
+    s_quiet_reason = "serial bridge";
+    ESP_LOGI(TAG, "UART bridged at %u baud -- driver is off the wire",
+             (unsigned)baud);
+    return true;
+}
+
+int ld2402_bridge_read(uint8_t *buf, size_t len, uint32_t timeoutMs) {
+    if (!s_bridge) return -1;
+    return uart_read_bytes(UART_PORT, buf, len, pdMS_TO_TICKS(timeoutMs));
+}
+
+int ld2402_bridge_write(const uint8_t *buf, size_t len) {
+    if (!s_bridge) return -1;
+    return uart_write_bytes(UART_PORT, (const char *)buf, len);
+}
+
+void ld2402_bridge_end(void) {
+    if (!s_bridge) return;
+    s_bridge = false;
+    uart_set_baudrate(UART_PORT, UART_BAUD);
+    uart_flush_input(UART_PORT);
+    // The module may have been re-flashed underneath us, so nothing cached
+    // about it is trustworthy any more -- version, serial, thresholds, the
+    // lot. A reboot is the honest reset and is what the ESP side does; this
+    // path exists for the case where it does not.
+    invalidate_threshold_cache();
+    s_max_distance_m = -1;
+    s_disappear_delay_s = -1;
+    s_quiet_reason = nullptr;
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGI(TAG, "UART bridge closed");
+}
+
 bool ld2402_set_max_distance_m(float meters, uint16_t timeoutMs) {
     int v = (int)roundf(meters * 10.0f);
     if (v < 7) v = 7;
