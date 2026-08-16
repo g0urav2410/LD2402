@@ -268,29 +268,6 @@ bool ld2402_auto_gain_done(uint16_t timeout_ms);              // waits for the m
 bool ld2402_read_parameter_raw(uint16_t id, uint32_t *value, uint16_t timeout_ms);
 bool ld2402_set_parameter_raw(uint16_t id, uint32_t value, uint16_t timeout_ms);
 
-// ---- Handing the UART to someone else ----
-//
-// For running the vendor's own Windows tool against the module -- a firmware
-// re-flash in particular, which this driver does not implement and should not:
-// the upgrade protocol is HLK's, it changes between tool releases, and getting
-// it wrong bricks the module rather than returning an error.
-//
-// So instead of reimplementing it, get out of the way. bridge_begin() takes
-// the UART mutex and holds it, which stops the streaming parser, the
-// engineering-mode watchdog and the threshold cache from putting bytes on the
-// wire, then switches the port to whatever baud the tool wants. Everything
-// between begin and end is raw: no framing, no parsing, no interpretation.
-//
-// The caller is responsible for pumping bytes both ways and for calling
-// bridge_end() (or rebooting, which is cleaner and is what the ESP side
-// actually does). While a bridge is open every other config call in this
-// header will fail with LD2402_ERR_BUSY, which is the honest answer.
-bool ld2402_bridge_begin(uint32_t baud, uint16_t timeout_ms);
-int  ld2402_bridge_read(uint8_t *buf, size_t len, uint32_t timeout_ms);
-int  ld2402_bridge_write(const uint8_t *buf, size_t len);
-void ld2402_bridge_end(void);
-bool ld2402_bridge_active(void);
-
 #ifdef __cplusplus
 }
 #endif
