@@ -470,6 +470,12 @@ bool ld2402_get_cached_max_distance_m(float *meters) {
     return true;
 }
 
+// Bumped each time the module returns from a silence nobody asked for -- see
+// ld2402_connect_generation() in the header.
+static volatile uint32_t s_connect_generation = 0;
+
+uint32_t ld2402_connect_generation(void) { return s_connect_generation; }
+
 bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds) {
     if (s_disappear_delay_s < 0) return false;
     if (seconds) *seconds = (uint16_t)s_disappear_delay_s;
@@ -695,8 +701,23 @@ static void engineering_watchdog_task(void *arg) {
                 } else {
                     notify("sensor module stopped responding");
                     paused_deliberately = false;
+                    // Forget everything cached about it.
+                    //
+                    // Silence nobody asked for has two causes and they are
+                    // indistinguishable from here: the module rebooted, or it
+                    // was unplugged and a different one put in its place. The
+                    // second is now easy to do and makes every cached value a
+                    // statement about the wrong part -- including the ones
+                    // used to skip redundant flash writes, so a Save against
+                    // the new module gets silently dropped as "already that
+                    // value". Re-reading costs one config session; being
+                    // wrong costs a setting that never applied.
+                    s_max_distance_m = -1;
+                    s_disappear_delay_s = -1;
+                    invalidate_threshold_cache();
                 }
             } else {
+                if (!paused_deliberately) s_connect_generation++;
                 if (paused_deliberately) {
                     notify("sensor resumed after %s",
                            s_quiet_reason ? s_quiet_reason : "pause");

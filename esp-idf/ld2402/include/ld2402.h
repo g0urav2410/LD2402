@@ -146,6 +146,22 @@ void ld2402_bulk_write_progress(int *done, int *total);
 bool ld2402_get_cached_max_distance_m(float *meters);
 bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
 
+// Counts how many times a module has come back after unexpectedly going away.
+//
+// It exists because the module is not necessarily the same one. Swap it on a
+// running board -- easy once there is a connector -- and every cached fact
+// about it belongs to the part that just left: max range, disappear delay, all
+// 32 thresholds, and above all its serial and firmware, which callers cache
+// hardest because they "cannot change while it is powered".
+//
+// This driver drops its own caches on the way out (see the watchdog), but it
+// cannot reach into a caller's. So it counts instead: hold the value alongside
+// anything cached about the module, and re-read when it changes.
+//
+// Deliberate pauses -- calibration, auto-gain, a config session -- also stop
+// the stream, and those do not count. Only silence nobody asked for.
+uint32_t ld2402_connect_generation(void);
+
 // The engineering frame's first byte as received: 0 nobody, 1 moving, 2 still.
 // Everything in the frame is decoded into ld2402_reading_t already, so this is
 // only for looking at what the module sent rather than what this driver made
