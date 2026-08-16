@@ -153,6 +153,16 @@ bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
 // finally caught. See the note above s_state in ld2402.cpp.
 uint8_t ld2402_debug_raw_state(void);
 
+// Every distinct state byte seen since boot, as a bitmask: bit N set means
+// byte N has arrived at least once. Cleared only by a reboot.
+//
+// The instantaneous byte above answers "what is it doing now"; this answers
+// "has this module ever reported still at all", which is the question when
+// stillness seems never to happen. One is a sample and can miss; the other
+// cannot. Bytes above 31 are folded into bit 31 rather than dropped -- an
+// unexpected value showing up is itself the finding.
+uint32_t ld2402_debug_state_seen_mask(void);
+
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
 // sensor -- reads a cached struct under a short mutex hold.
 void ld2402_get_reading(ld2402_reading_t *out);

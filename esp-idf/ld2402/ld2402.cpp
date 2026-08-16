@@ -553,6 +553,9 @@ static void handleTextByte(uint8_t b) {
 
 uint8_t ld2402_debug_raw_state(void) { return s_state; }
 
+static volatile uint32_t s_state_seen = 0;
+uint32_t ld2402_debug_state_seen_mask(void) { return s_state_seen; }
+
 static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
     // The whole frame at debug level, for when the decoded reading and the
@@ -560,6 +563,7 @@ static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     // it costs a level check per frame the rest of the time.
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, body, len, ESP_LOG_DEBUG);
     s_state = body[0];
+    s_state_seen |= 1u << (s_state < 31 ? s_state : 31);
     s_distanceCm = body[1] | ((uint16_t)body[2] << 8);
     s_engineering = true;
     if (len >= 3 + 32 * 4) {
