@@ -667,13 +667,20 @@ static void publishReading() {
         // that, in both directions -- holding one way only just moves the
         // flicker to the other, which showed up as the light going moving,
         // still, moving on a single walk-in.
-        const bool between_active =
-            (r.activity == LD2402_MOVING || r.activity == LD2402_STILL) &&
-            (s_published_activity == LD2402_MOVING || s_published_activity == LD2402_STILL);
         const uint32_t hold_ms = s_debounce_ms;
-        const bool arriving = !between_active;
+        // Going absent is published as-is, at once. This has to be tested
+        // before the arrival rule below, and separately from it: both involve
+        // absent, and folding them into one "not between_active" branch made
+        // the room emptying take the arrival path -- which forces moving --
+        // so an empty room reported movement and stayed there for good.
+        const bool leaving = r.activity == LD2402_ABSENT;
+        const bool arriving = !leaving && s_published_activity == LD2402_ABSENT;
 
-        if (arriving) {
+        if (leaving) {
+            s_published_activity = LD2402_ABSENT;
+            s_pending_activity = LD2402_ABSENT;
+            s_pending_since_us = now;
+        } else if (arriving) {
             // An arrival is movement, whatever the first frame classified it
             // as. You have to move to arrive: a presence event that begins
             // with someone already motionless is not a thing that happens.
