@@ -365,16 +365,13 @@ static bool s_thresholds_valid = false;
 static volatile uint32_t s_state_seen = 0;
 
 // State debounce -- see ld2402_set_state_debounce_ms() in the header.
-static volatile uint16_t s_debounce_ms = 2000;
-static volatile uint16_t s_still_to_moving_ms = 500;
+static volatile uint16_t s_debounce_ms = 500;
 static ld2402_activity_t s_published_activity = LD2402_ABSENT;
 static ld2402_activity_t s_pending_activity = LD2402_ABSENT;
 static int64_t s_pending_since_us = 0;
 
 void ld2402_set_state_debounce_ms(uint16_t ms) { s_debounce_ms = ms; }
 uint16_t ld2402_get_state_debounce_ms(void) { return s_debounce_ms; }
-void ld2402_set_still_to_moving_ms(uint16_t ms) { s_still_to_moving_ms = ms; }
-uint16_t ld2402_get_still_to_moving_ms(void) { return s_still_to_moving_ms; }
 
 // Same idea for the two module settings the app's Save button always sends
 // together, changed or not. -1 means never read, so the first write always
@@ -616,7 +613,7 @@ static void publishReading() {
     // afterwards rather than debounced separately: three flags settling at
     // different moments is how a reading ends up claiming to be moving and
     // absent at once.
-    if (s_debounce_ms || s_still_to_moving_ms) {
+    if (s_debounce_ms) {
         const int64_t now = esp_timer_get_time();
         // Only moving<->still is debounced, in both directions.
         //
@@ -655,28 +652,42 @@ static void publishReading() {
         // frame over threshold is not movement either. A quarter of the
         // debounce, capped at half a second, rejects the one-frame blips
         // without being perceptible: at the 2 s default that is 500 ms.
-        // Two holds, by destination:
+        // One hold, and only between moving and still.
         //
-        //   -> absent          the long one. Publishing it wrongly makes the
-        //                      room read as empty with someone sitting in it.
-        //   moving <-> still   the short one, symmetric. Both directions
-        //                      flicker, because the two chains are the same
-        //                      signal under different filters and a person at
-        //                      the edge of a threshold crosses it for a frame
-        //                      at a time. Holding only one direction just
-        //                      moves the flicker to the other -- which showed
-        //                      up as the light going moving, still, moving on
-        //                      a single walk-in.
+        // Absent is not debounced here at all: the module's own disappear
+        // delay already decides how long the room stays occupied after motion
+        // stops, and that is the setting for the job. A second hold on top
+        // duplicated it, silently added to it, and needed the two summed
+        // together to explain what the device would do -- a total you have to
+        // explain is a sign there is one setting too many.
         //
-        // Arriving is never held: from absent to anything is published at once.
-        const uint32_t hold_ms = (r.activity == LD2402_ABSENT)
-                               ? s_debounce_ms : s_still_to_moving_ms;
-        const bool arriving = s_published_activity == LD2402_ABSENT &&
-                              r.activity != LD2402_ABSENT;
+        // What is left is the part the module cannot do: it reports moving and
+        // still from the same signal under two filters, so a person shifting
+        // in a chair crosses between them for a frame at a time. This holds
+        // that, in both directions -- holding one way only just moves the
+        // flicker to the other, which showed up as the light going moving,
+        // still, moving on a single walk-in.
+        const bool between_active =
+            (r.activity == LD2402_MOVING || r.activity == LD2402_STILL) &&
+            (s_published_activity == LD2402_MOVING || s_published_activity == LD2402_STILL);
+        const uint32_t hold_ms = s_debounce_ms;
+        const bool arriving = !between_active;
 
         if (arriving) {
-            s_published_activity = r.activity;
-            s_pending_activity = r.activity;
+            // An arrival is movement, whatever the first frame classified it
+            // as. You have to move to arrive: a presence event that begins
+            // with someone already motionless is not a thing that happens.
+            //
+            // It happens here because the first frame is published unheld --
+            // presence must not wait -- so a single frame that fails to clear
+            // a movement threshold makes the whole event start as still. Near
+            // the sensor that is not even unlikely: the gates covering the
+            // first metre or so can carry thresholds no person clears.
+            //
+            // Stated rather than held, so presence is still reported at once.
+            // Stillness follows a moment later if they really have settled.
+            s_published_activity = LD2402_MOVING;
+            s_pending_activity = LD2402_MOVING;
             s_pending_since_us = now;
         } else if (r.activity != s_published_activity) {
             if (r.activity != s_pending_activity) {

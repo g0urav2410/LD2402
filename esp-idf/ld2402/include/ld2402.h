@@ -240,45 +240,24 @@ uint32_t ld2402_debug_state_seen_mask(void);
 // movement threshold for a frame or two at a time. Un-debounced that is tens
 // of state changes a minute, which is unusable for anything driving a light.
 //
-// Holds a published still against dropping to absent: once stillness is
-// reported, the room only reads empty if it stays empty for this long.
+// How long a change between moving and still must hold before it is reported.
 //
-// Still -> moving has its own, shorter hold -- see
-// ld2402_set_still_to_moving_ms().
+// The module reports moving and still from the same signal under two
+// different filters, so a person shifting in a chair crosses between them for
+// a frame at a time -- 31 state changes in 80 seconds, measured, on someone
+// sitting still. Every one is an MQTT publish and a row in a history graph.
 //
-// Someone sitting quietly is the case that fluctuates. Their gate energies sit
-// near the thresholds and cross them for a frame at a time, so the raw
-// classification jumps to moving or drops to absent and straight back, tens of
-// times a minute, on a person who has done nothing. Every one of those is an
-// MQTT publish and a row in Home Assistant's history.
+// Symmetric: holding one direction only moves the flicker to the other.
 //
-// Arriving, and settling from moving into still, are published immediately.
-// Only departures from a published still wait, and a real change is published
-// the moment the debounce elapses.
+// Deliberately does NOT cover "the room is empty". The module's own disappear
+// delay already decides that, and a second hold here duplicated it, added to
+// it, and meant the two had to be summed to say what the device would do.
+// Arriving, and going absent, are reported without delay.
 //
-// This is not cosmetic. Every change is an MQTT publish and a row in Home
-// Assistant's history, so 31 changes in 80 seconds -- measured, un-debounced,
-// on someone sitting still -- floods the recorder with transitions that
-// describe nothing and bury the ones that matter.
-//
-// Anything involving absent is passed straight through: presence comes from
-// the module, which already holds it for the disappear delay, and holding it
-// again here would extend a delay the user had already chosen.
-//
-// 0 disables it and restores the raw per-frame behaviour.
+// 0 disables it.
 void ld2402_set_state_debounce_ms(uint16_t ms);
 uint16_t ld2402_get_state_debounce_ms(void);
 
-// How long a change between moving and still must persist before it is
-// published. Symmetric -- it holds both directions.
-//
-// Separate from the value above because the two are tuned against different
-// annoyances: that one is "how sure do I want to be that the room is empty",
-// this is "how twitchy may the moving/still label be". Holding only one
-// direction does not work: the flicker simply moves to the other, which showed
-// up as the light going moving, still, moving on a single walk-in.
-void ld2402_set_still_to_moving_ms(uint16_t ms);
-uint16_t ld2402_get_still_to_moving_ms(void);
 
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
 // sensor -- reads a cached struct under a short mutex hold.
