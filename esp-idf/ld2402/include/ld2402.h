@@ -162,6 +162,20 @@ bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds);
 // the stream, and those do not count. Only silence nobody asked for.
 uint32_t ld2402_connect_generation(void);
 
+// A copy of the most recent engineering frame's body, exactly as received.
+//
+// Everything in it is decoded already, so this is for the case where the
+// decode and the hardware appear to disagree and the only way to settle it is
+// to read the bytes against the manual's frame diagram:
+//
+//   state(1) | distance(2, LE, cm) | motion[16] u32 LE | still[16] u32 LE
+//
+// Returns bytes copied, 0 if no frame has arrived. The energies are raw
+// per-gate accumulators, NOT dB -- the dB figures elsewhere are
+// 10*log10(raw), so a gate reading 0 here is genuinely zero rather than a
+// small number that rounded away.
+size_t ld2402_debug_last_frame(uint8_t *out, size_t max, uint16_t *frame_len);
+
 // The engineering frame's first byte as received: 0 nobody, 1 moving, 2 still.
 // Everything in the frame is decoded into ld2402_reading_t already, so this is
 // only for looking at what the module sent rather than what this driver made

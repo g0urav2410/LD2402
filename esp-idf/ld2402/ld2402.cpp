@@ -562,6 +562,22 @@ uint8_t ld2402_debug_raw_state(void) { return s_state; }
 static volatile uint32_t s_state_seen = 0;
 uint32_t ld2402_debug_state_seen_mask(void) { return s_state_seen; }
 
+// The last engineering frame body, kept verbatim. 131 is the documented size
+// (1 state + 2 distance + 128 energies); the extra few bytes are so a frame
+// that is not that size is still captured rather than silently clipped to
+// look like one that is.
+static uint8_t s_last_frame[144];
+static uint16_t s_last_frame_len = 0;
+static uint16_t s_last_frame_full = 0;
+
+size_t ld2402_debug_last_frame(uint8_t *out, size_t max, uint16_t *frame_len) {
+    if (frame_len) *frame_len = s_last_frame_full;
+    if (!out || !s_last_frame_len) return 0;
+    const size_t n = s_last_frame_len < max ? s_last_frame_len : max;
+    memcpy(out, s_last_frame, n);
+    return n;
+}
+
 static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
     // The whole frame at debug level, for when the decoded reading and the
@@ -570,6 +586,11 @@ static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, body, len, ESP_LOG_DEBUG);
     s_state = body[0];
     s_state_seen |= 1u << (s_state < 31 ? s_state : 31);
+    // Keep the bytes as well as the decode, for reading against the manual's
+    // frame diagram when the two appear to disagree.
+    s_last_frame_len = len < sizeof(s_last_frame) ? len : sizeof(s_last_frame);
+    memcpy(s_last_frame, body, s_last_frame_len);
+    s_last_frame_full = len;
     s_distanceCm = body[1] | ((uint16_t)body[2] << 8);
     s_engineering = true;
     if (len >= 3 + 32 * 4) {
