@@ -176,6 +176,33 @@ uint32_t ld2402_connect_generation(void);
 // small number that rounded away.
 size_t ld2402_debug_last_frame(uint8_t *out, size_t max, uint16_t *frame_len);
 
+// The last ~320 bytes straight off the UART, oldest first, before any parsing.
+//
+// Unlike the frame above this includes the framing the manual documents --
+// the F4 F3 F2 F1 header, the length, the F8 F7 F6 F5 footer -- and anything
+// the parser threw away, which is what you need when frames are being dropped
+// rather than merely decoded oddly. Returns bytes copied.
+size_t ld2402_debug_raw_stream(uint8_t *out, size_t max);
+
+// Set the output mode to an arbitrary value, for finding out what this
+// firmware actually supports.
+//
+// ld2402_set_output_mode() offers the two values the protocol writeup
+// documents -- 4 (binary engineering) and 0x64 (ASCII). Nothing says those are
+// the only ones the firmware accepts, and it carries LD2410-compatibility
+// commands (0x0060/0x0061, described as "LD2410-shaped"), which raises the
+// question of whether it can also emit an LD2410-shaped *data* frame -- those
+// report a target-state byte of 0 none / 1 moving / 2 stationary / 3 both.
+//
+// Safe to experiment with: output mode lives in the module's RAM, so any value
+// is undone by a power cycle, and the driver's watchdog puts engineering mode
+// back when it notices.
+bool ld2402_set_output_mode_raw(uint32_t value, uint16_t timeout_ms);
+
+// Stop the watchdog putting engineering mode back, so another mode can be
+// observed for more than five seconds. Not persistent; a reboot clears it.
+void ld2402_suspend_engineering_watchdog(bool suspend);
+
 // The engineering frame's first byte as received: 0 nobody, 1 moving, 2 still.
 // Everything in the frame is decoded into ld2402_reading_t already, so this is
 // only for looking at what the module sent rather than what this driver made

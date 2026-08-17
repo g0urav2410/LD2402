@@ -487,6 +487,10 @@ bool ld2402_get_cached_disappear_delay_s(uint16_t *seconds) {
 // it after the module reboots itself. Defaults to on: streaming the energy
 // gates is the reason to use this driver over the module's plain IO pin.
 static volatile bool s_want_engineering = true;
+
+// Set while another output mode is being observed, so the watchdog does not
+// undo the experiment five seconds in.
+static volatile bool s_watchdog_suspended = false;
 static uint32_t s_byteCount = 0;
 static int64_t s_lastByteUs = 0;
 static int64_t s_lastUpdateUs = 0;
@@ -609,9 +613,37 @@ static void handleEngineeringFrame(const uint8_t *body, uint16_t len) {
 // unvalidated footer let electrical noise that happened to produce a
 // plausible header+length get accepted as a frame, occasionally reporting
 // fake presence. Carried over unchanged.
+// The last bytes off the UART, before any parsing.
+//
+// handleEngineeringFrame() only ever sees the body: the state machine below
+// validates and consumes the F4 F3 F2 F1 header, the length and the
+// F8 F7 F6 F5 footer, so a dump taken there cannot show the framing the manual
+// documents -- nor anything the parser rejected, which is exactly what you
+// want when frames are being dropped. This sits ahead of all of it.
+//
+// 320 bytes is a little over two whole 141-byte packets, so a dump always
+// contains at least one complete frame with its framing intact.
+static uint8_t s_raw[320];
+static uint16_t s_raw_head = 0;
+static bool s_raw_wrapped = false;
+
+size_t ld2402_debug_raw_stream(uint8_t *out, size_t max) {
+    if (!out) return 0;
+    // Oldest first, so the result reads in the order the bytes arrived.
+    const size_t have = s_raw_wrapped ? sizeof(s_raw) : s_raw_head;
+    const size_t n = have < max ? have : max;
+    for (size_t i = 0; i < n; i++) {
+        const size_t idx = (s_raw_head + sizeof(s_raw) - n + i) % sizeof(s_raw);
+        out[i] = s_raw[idx];
+    }
+    return n;
+}
+
 static void feedByte(uint8_t b) {
     s_byteCount++;
     s_lastByteUs = esp_timer_get_time();
+    s_raw[s_raw_head] = b;
+    if (++s_raw_head >= sizeof(s_raw)) { s_raw_head = 0; s_raw_wrapped = true; }
     switch (s_pstate) {
         case P_IDLE:
             if (b == ENG_HDR[0]) s_pstate = P_HDR2;
@@ -754,7 +786,7 @@ static void engineering_watchdog_task(void *arg) {
             first_pass = false;
         }
 
-        if (!s_want_engineering) continue;
+        if (!s_want_engineering || s_watchdog_suspended) continue;
 
         // Only act when the module is demonstrably alive and demonstrably
         // not in engineering mode. `connected` false means no frames at all
@@ -1019,6 +1051,31 @@ bool ld2402_read_serial_number(char *buf, size_t cap, uint16_t timeoutMs) {
     memcpy(buf, extra + 2, snLen);
     buf[snLen] = '\0';
     return true;
+}
+
+void ld2402_suspend_engineering_watchdog(bool suspend) {
+    s_watchdog_suspended = suspend;
+}
+
+bool ld2402_set_output_mode_raw(uint32_t value, uint16_t timeoutMs) {
+    if (!ld2402_enable_config(timeoutMs)) return false;
+    bool ok;
+    {
+        UartSession s;
+        if (!s.held) { ld2402_end_config(timeoutMs); return fail(LD2402_ERR_BUSY); }
+        uint8_t val[6] = {0x00, 0x00,
+                          (uint8_t)value, (uint8_t)(value >> 8),
+                          (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
+        sendCommand(0x0012, val, 6);
+        ok = waitAck(0x0012, 1000);
+    }
+    ld2402_end_config(timeoutMs);
+    // The parser decides what it is looking at from the bytes themselves, but
+    // s_engineering is only cleared when a text line arrives -- so a mode that
+    // emits neither would otherwise leave it reading true forever.
+    if (ok && value != 4) s_engineering = false;
+    ESP_LOGW(TAG, "output mode set to %u (experiment)", (unsigned)value);
+    return ok;
 }
 
 bool ld2402_set_output_mode(bool engineering, uint16_t timeoutMs) {
