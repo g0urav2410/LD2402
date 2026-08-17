@@ -360,6 +360,22 @@ static uint16_t s_trigger_seen = 0;
 static uint16_t s_motionless_seen = 0;
 static bool s_thresholds_valid = false;
 
+// Every distinct state byte seen since boot. Read by publishReading() to tell
+// "this module does not report stillness" from "it is not still right now".
+static volatile uint32_t s_state_seen = 0;
+
+// State debounce -- see ld2402_set_state_debounce_ms() in the header.
+static volatile uint16_t s_debounce_ms = 2000;
+static volatile uint16_t s_still_to_moving_ms = 500;
+static ld2402_activity_t s_published_activity = LD2402_ABSENT;
+static ld2402_activity_t s_pending_activity = LD2402_ABSENT;
+static int64_t s_pending_since_us = 0;
+
+void ld2402_set_state_debounce_ms(uint16_t ms) { s_debounce_ms = ms; }
+uint16_t ld2402_get_state_debounce_ms(void) { return s_debounce_ms; }
+void ld2402_set_still_to_moving_ms(uint16_t ms) { s_still_to_moving_ms = ms; }
+uint16_t ld2402_get_still_to_moving_ms(void) { return s_still_to_moving_ms; }
+
 // Same idea for the two module settings the app's Save button always sends
 // together, changed or not. -1 means never read, so the first write always
 // goes through rather than being compared against a guess.
@@ -516,10 +532,169 @@ static void publishReading() {
     // happen.
     r.moving = (s_state == LD2402_STATE_MOVING);
     r.still  = (s_state == LD2402_STATE_STILL);
+
+    // Fall back to deriving stillness on modules that never report it.
+    //
+    // This driver used to derive moving/still from the gate energies, and that
+    // was replaced by reading the state byte after a module was observed
+    // sending 0x02 -- a better answer where it exists, since the module's own
+    // still detector is a long-window breathing filter that no threshold
+    // comparison here can match.
+    //
+    // The mistake was generalising from that one module. Measured across four
+    // parts on the same firmware v3.3.5: one emits 0x02, three never do in
+    // ordinary use. On those three, reading the byte alone means stillness
+    // simply does not exist -- a person sitting quietly reads as moving, or as
+    // nobody once the disappear delay expires.
+    //
+    // So: prefer the module's answer, and derive only for modules that have
+    // never given one. s_state_seen makes that distinction cheap and honest --
+    // it is a record of every state byte since boot, so "has never reported
+    // still" is a fact rather than an assumption about the current frame.
+    //
+    // The derivation is the original one: present, and no movement gate over
+    // its threshold. Gate 0 is skipped because near-field clutter there would
+    // otherwise pin `moving` true forever -- which is exactly what a board
+    // with its own PCB in the antenna's near field does.
+    // Presence is left exactly as the module reported it -- only the
+    // moving/still label is derived.
+    //
+    // A version of this derived presence too, from the gate energies, and it
+    // was worse in the way that matters: the energies of someone sitting
+    // quietly hover around their threshold, so presence itself dropped out
+    // frame to frame and the room read as empty with the person still in it.
+    // Losing presence turns a light off; mislabelling moving as still only
+    // changes a word. The module's bit has its disappear delay behind it and
+    // is far steadier, so it decides whether anyone is there, and this decides
+    // only what they are doing.
+    if (!r.still && !(s_state_seen & (1u << LD2402_STATE_STILL))) {
+        // Presence is whatever the module said; only the label is derived.
+        r.moving = false;
+        if (!r.presence) {
+            // Nothing to classify. The gate scan used to run regardless, so a
+            // stray gate over threshold with nobody detected produced
+            // moving=true, presence=false -- a combination that cannot be true
+            // and that no consumer could render.
+        } else if (s_engineering && s_thresholds_valid) {
+            // Mirrors the module's own peak selection: scan gates 1..15 and
+            // take any gate whose energy clears that gate's threshold. Gate 0
+            // is skipped for the same reason the module skips it -- its
+            // threshold is never evaluated, so including it would let
+            // near-field clutter set a flag no configuration could clear.
+            for (uint8_t g = 1; g < 16; g++) {
+                if (!isnan(r.trigger_db[g]) && r.trigger_db[g] > s_trigger_th[g]) {
+                    r.moving = true;
+                    break;
+                }
+            }
+        } else {
+            // No engineering frame or no threshold cache yet: presence is all
+            // there is, so report it as movement rather than inventing a
+            // classification. Guessing "still" here is what once made a
+            // walking person read as stationary.
+            r.moving = true;
+        }
+        // Still is the complement of moving, not its own threshold test.
+        //
+        // Testing the motionless energies separately looks more principled and
+        // isn't: the two chains are the same signal under different filters,
+        // so both can clear, neither can, or either alone can -- four
+        // combinations for a two-way question, and two of them have nothing
+        // sensible to display. Something is there, and it is either moving or
+        // it isn't.
+        r.still = r.presence && !r.moving;
+    }
     // One value carrying the same decision, so callers that want a single
     // answer do not have to recombine the booleans and risk inventing a
     // fourth state that cannot occur.
+    // Recomputed after the derivation above, which can change all three.
     r.activity = !r.presence ? LD2402_ABSENT : (r.moving ? LD2402_MOVING : LD2402_STILL);
+
+    // Debounce -- see ld2402_set_state_debounce_ms().
+    //
+    // The booleans are brought back into line with the published activity
+    // afterwards rather than debounced separately: three flags settling at
+    // different moments is how a reading ends up claiming to be moving and
+    // absent at once.
+    if (s_debounce_ms || s_still_to_moving_ms) {
+        const int64_t now = esp_timer_get_time();
+        // Only moving<->still is debounced, in both directions.
+        //
+        // That is the pair that flickers: the two chains are the same signal
+        // under different filters, so someone shifting in a chair crosses back
+        // and forth several times a second.
+        //
+        // Anything involving absent is passed straight through. Presence comes
+        // from the module, which already holds it for the disappear delay --
+        // the setting that exists for exactly this -- so holding it again here
+        // would silently extend a delay the user had already chosen, and make
+        // arrivals late for no reason.
+        // Still is the sticky state: leaving it has to be sustained.
+        //
+        // Someone sitting quietly is the case that fluctuates. Their gate
+        // energies sit near the thresholds and cross them for a frame at a
+        // time, so the raw classification jumps out to moving, or drops to
+        // absent, and straight back -- tens of times a minute on a person who
+        // has not actually done anything. Holding the exit is what makes the
+        // published state describe the room rather than the noise.
+        //
+        // Everything else is immediate: arriving, and settling from moving
+        // into still. Only departures from a published still wait, and only
+        // for as long as the fluctuation lasts -- a real change persists and
+        // is published as soon as the debounce elapses.
+        // Both departures from a published still are held, for different
+        // lengths, because they are different kinds of event.
+        //
+        // Dropping to absent is almost always the signal dipping under
+        // threshold for a frame on someone sitting right there, and publishing
+        // it makes the room read as empty with a person in it -- so it gets
+        // the full debounce.
+        //
+        // Movement is usually real and is the edge everything downstream
+        // reacts to, so a long hold is felt immediately as lag. But a single
+        // frame over threshold is not movement either. A quarter of the
+        // debounce, capped at half a second, rejects the one-frame blips
+        // without being perceptible: at the 2 s default that is 500 ms.
+        // Two holds, by destination:
+        //
+        //   -> absent          the long one. Publishing it wrongly makes the
+        //                      room read as empty with someone sitting in it.
+        //   moving <-> still   the short one, symmetric. Both directions
+        //                      flicker, because the two chains are the same
+        //                      signal under different filters and a person at
+        //                      the edge of a threshold crosses it for a frame
+        //                      at a time. Holding only one direction just
+        //                      moves the flicker to the other -- which showed
+        //                      up as the light going moving, still, moving on
+        //                      a single walk-in.
+        //
+        // Arriving is never held: from absent to anything is published at once.
+        const uint32_t hold_ms = (r.activity == LD2402_ABSENT)
+                               ? s_debounce_ms : s_still_to_moving_ms;
+        const bool arriving = s_published_activity == LD2402_ABSENT &&
+                              r.activity != LD2402_ABSENT;
+
+        if (arriving) {
+            s_published_activity = r.activity;
+            s_pending_activity = r.activity;
+            s_pending_since_us = now;
+        } else if (r.activity != s_published_activity) {
+            if (r.activity != s_pending_activity) {
+                s_pending_activity = r.activity;
+                s_pending_since_us = now;
+            } else if (now - s_pending_since_us >= (int64_t)hold_ms * 1000) {
+                s_published_activity = r.activity;
+            }
+        } else {
+            // Back to what is already published: cancel any pending change.
+            s_pending_activity = r.activity;
+            s_pending_since_us = now;
+        }
+        r.activity = s_published_activity;
+        r.moving   = (r.activity == LD2402_MOVING);
+        r.still    = (r.activity == LD2402_STILL);
+        r.presence = (r.activity != LD2402_ABSENT);
+    }
     r.bytes_received = s_byteCount;
     r.last_byte_us = s_lastByteUs;
     r.last_update_us = s_lastUpdateUs;
@@ -563,7 +738,6 @@ static void handleTextByte(uint8_t b) {
 
 uint8_t ld2402_debug_raw_state(void) { return s_state; }
 
-static volatile uint32_t s_state_seen = 0;
 uint32_t ld2402_debug_state_seen_mask(void) { return s_state_seen; }
 
 // The last engineering frame body, kept verbatim. 131 is the documented size
@@ -1055,6 +1229,29 @@ bool ld2402_read_serial_number(char *buf, size_t cap, uint16_t timeoutMs) {
 
 void ld2402_suspend_engineering_watchdog(bool suspend) {
     s_watchdog_suspended = suspend;
+}
+
+size_t ld2402_debug_command(uint16_t word, const uint8_t *payload, size_t payloadLen,
+                            uint8_t *reply, size_t replyMax, uint16_t timeoutMs) {
+    if (!ld2402_enable_config(timeoutMs)) return 0;
+    size_t got = 0;
+    {
+        UartSession s;
+        if (s.held) {
+            sendCommand(word, payload, (uint16_t)payloadLen);
+            // waitAck hands back the payload after the 2-byte echoed command
+            // word -- which is where a status field lives, and what the
+            // manual's byte offsets are counted against.
+            uint16_t n = 0;
+            static uint8_t extra[200];
+            if (waitAck(word, timeoutMs, extra, sizeof(extra), &n)) {
+                got = n < replyMax ? n : replyMax;
+                memcpy(reply, extra, got);
+            }
+        }
+    }
+    ld2402_end_config(timeoutMs);
+    return got;
 }
 
 bool ld2402_set_output_mode_raw(uint32_t value, uint16_t timeoutMs) {

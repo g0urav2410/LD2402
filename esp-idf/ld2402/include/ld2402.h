@@ -203,6 +203,19 @@ bool ld2402_set_output_mode_raw(uint32_t value, uint16_t timeout_ms);
 // observed for more than five seconds. Not persistent; a reboot clears it.
 void ld2402_suspend_engineering_watchdog(bool suspend);
 
+// Send an arbitrary command and hand back the raw reply, framing and all.
+//
+// For checking the manual against the hardware when the two seem to disagree:
+// the reply is returned exactly as it arrived, so a status field at a given
+// byte offset can be read off directly rather than through this driver's idea
+// of what the command means.
+//
+// Enters and leaves config mode around the exchange, since nearly every
+// command requires it. Returns bytes copied into `reply`, 0 if nothing came
+// back.
+size_t ld2402_debug_command(uint16_t word, const uint8_t *payload, size_t payload_len,
+                            uint8_t *reply, size_t reply_max, uint16_t timeout_ms);
+
 // The engineering frame's first byte as received: 0 nobody, 1 moving, 2 still.
 // Everything in the frame is decoded into ld2402_reading_t already, so this is
 // only for looking at what the module sent rather than what this driver made
@@ -219,6 +232,53 @@ uint8_t ld2402_debug_raw_state(void);
 // cannot. Bytes above 31 are folded into bit 31 rather than dropped -- an
 // unexpected value showing up is itself the finding.
 uint32_t ld2402_debug_state_seen_mask(void);
+
+// How long a calmer state must persist before it is published, in ms.
+//
+// The raw classification flickers: the two detector chains are the same signal
+// under different filters, and a person shifting their weight crosses the
+// movement threshold for a frame or two at a time. Un-debounced that is tens
+// of state changes a minute, which is unusable for anything driving a light.
+//
+// Holds a published still against dropping to absent: once stillness is
+// reported, the room only reads empty if it stays empty for this long.
+//
+// Still -> moving has its own, shorter hold -- see
+// ld2402_set_still_to_moving_ms().
+//
+// Someone sitting quietly is the case that fluctuates. Their gate energies sit
+// near the thresholds and cross them for a frame at a time, so the raw
+// classification jumps to moving or drops to absent and straight back, tens of
+// times a minute, on a person who has done nothing. Every one of those is an
+// MQTT publish and a row in Home Assistant's history.
+//
+// Arriving, and settling from moving into still, are published immediately.
+// Only departures from a published still wait, and a real change is published
+// the moment the debounce elapses.
+//
+// This is not cosmetic. Every change is an MQTT publish and a row in Home
+// Assistant's history, so 31 changes in 80 seconds -- measured, un-debounced,
+// on someone sitting still -- floods the recorder with transitions that
+// describe nothing and bury the ones that matter.
+//
+// Anything involving absent is passed straight through: presence comes from
+// the module, which already holds it for the disappear delay, and holding it
+// again here would extend a delay the user had already chosen.
+//
+// 0 disables it and restores the raw per-frame behaviour.
+void ld2402_set_state_debounce_ms(uint16_t ms);
+uint16_t ld2402_get_state_debounce_ms(void);
+
+// How long a change between moving and still must persist before it is
+// published. Symmetric -- it holds both directions.
+//
+// Separate from the value above because the two are tuned against different
+// annoyances: that one is "how sure do I want to be that the room is empty",
+// this is "how twitchy may the moving/still label be". Holding only one
+// direction does not work: the flicker simply moves to the other, which showed
+// up as the light going moving, still, moving on a single walk-in.
+void ld2402_set_still_to_moving_ms(uint16_t ms);
+uint16_t ld2402_get_still_to_moving_ms(void);
 
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
 // sensor -- reads a cached struct under a short mutex hold.

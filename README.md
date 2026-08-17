@@ -140,11 +140,23 @@ still insists someone is in the room. Use `connected()` if you need to tell
 1. **Engineering mode off.** Check `haveEnergyGates()`. `loop()` turns it on
    by itself, so this should only happen if you turned it off, or if the
    sensor isn't responding to config commands at all.
-2. **Too close or too far.** Deep-stillness detection only covers roughly
-   **2.8 m to 4.9 m** (gates 4–7). That range is hard-wired into the sensor;
-   no threshold changes it. Outside it, a motionless person eventually reads
-   as absent.
-3. **Not actually still enough.** The sensor is sensitive — small movements
+2. **Your module may simply never send it.** Three of four modules tested,
+   all on v3.3.5, have never emitted `0x02`. Read
+   `ld2402_debug_state_seen_mask()`: if it never reaches `0x07`, the module is
+   not reporting stillness and the derived classifier is what you are seeing
+   — see "Where moving/still actually comes from". This is worth checking
+   *first*, because everything below assumes the module is capable of it.
+3. **Too close or too far.** The module's own deep-stillness tracker covers
+   roughly **2.8 m to 4.9 m** (gates 4–7), hard-wired. The derived classifier
+   has no such band, which is why stillness can work at 1 m on one build and
+   not another.
+4. **Thresholds too high where you actually are.** The derivation calls
+   anything "still" that does not clear a movement threshold, so a gate whose
+   threshold no person can reach makes *walking* read as still. Compare the
+   live energy at your distance against that gate's threshold before blaming
+   anything else — a near-field obstruction in front of the antenna will push
+   gates 0–1 to 49–52 dB, well above what a person produces there.
+5. **Not actually still enough.** The sensor is sensitive — small movements
    still count as movement.
 
 ## Making it more/less sensitive to distance
@@ -489,11 +501,60 @@ before changing how detection works.
 
 ## Where moving/still actually comes from
 
-The sensor decides it. This library just reports what it says.
+The sensor decides it **when it can**, and this library derives it when it
+cannot. Which of the two you get depends on the module in your hand.
 
 Each engineering frame's first byte is the answer: `0` nobody, `1` moving,
 `2` still. That is what the vendor manual documents, and what a real module
 sends.
+
+### Not every module sends `2`
+
+Measured across four modules, all reporting firmware **v3.3.5**: one emits
+`0x02` in ordinary use. The other three never have — through fresh
+calibrations, auto-gain, a firmware re-flash and every threshold setting worth
+trying. On those three, reading the byte alone means stillness does not exist:
+a person sitting quietly reads as moving, or as nobody once the disappear
+delay expires.
+
+So the library keeps a record of every state byte a module has sent since boot
+(`ld2402_debug_state_seen_mask()`), and:
+
+* **has sent `2` at least once** → its answer is used, unchanged. It is the
+  better detector: a long-window filter sensitive enough for breathing, which
+  no threshold comparison here can match.
+* **has never sent `2`** → moving is derived by scanning gates 1–15 for any
+  energy over that gate's threshold, and still is the complement: present, and
+  nothing moving.
+
+The record is sticky, so one `2` is enough to hand the decision back to the
+module permanently. Nothing is configured and nothing needs choosing — a
+module that can do this uses its own answer, and one that cannot still reports
+stillness.
+
+### Debouncing the result
+
+The raw classification flickers. The two detector chains are the same signal
+under different filters, so someone shifting in a chair crosses a threshold for
+a frame at a time: **31 state changes in 80 seconds**, measured on a person
+sitting still. Every one of those is an MQTT publish and a row in a history
+graph.
+
+Two settings, both in milliseconds, both live:
+
+```cpp
+ld2402_set_state_debounce_ms(2000);   // holds a drop to absent
+ld2402_set_still_to_moving_ms(500);   // holds moving <-> still, both ways
+```
+
+Arriving is never held — from absent to anything is published immediately,
+because a presence sensor slow to notice someone walk in has missed its
+purpose. Everything else waits for the relevant hold, and a real change is
+published the moment it elapses.
+
+Holding only one direction does not work. It was tried: the flicker simply
+moves to the other, and shows up as the status light going moving, still,
+moving on a single walk-in. Set either to `0` to disable it.
 
 **This library spent a long time believing otherwise, and it is worth knowing
 why.** A disassembly of the module's own firmware decompiled the code that
@@ -545,6 +606,11 @@ in your own code if you don't know about them:
 - **The still threshold is adaptive** — roughly 100× a running average of
   motion energy in the same gate — so nearby movement desensitises stillness
   detection in that gate. Not configurable.
+- **Not every module reports stillness.** Four modules on v3.3.5, one emits
+  the `0x02` state byte and three never do. Check
+  `ld2402_debug_state_seen_mask()` before concluding anything about a module's
+  behaviour — same part number and same firmware version is not the same
+  behaviour.
 - **Reported distance is quantised** to multiples of 70 cm by the tracker,
   and lags one measurement cycle behind.
 
