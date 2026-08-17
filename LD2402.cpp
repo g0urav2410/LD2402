@@ -125,6 +125,7 @@ void LD2402::handleTextLine(String line) {
 void LD2402::handleEngineeringFrame(const uint8_t *body, uint16_t len) {
     if (len < 3) return;
     _state = body[0];
+    _stateSeen |= 1u << (_state < 31 ? _state : 31);
     _distanceCm = body[1] | ((uint16_t)body[2] << 8);
     _engineering = true;
     if (len >= 3 + 32 * 4) {
@@ -588,7 +589,31 @@ bool LD2402::presence() const {
 // text mode: call setEngineeringMode(true) to get real still detection.
 LD2402::Activity LD2402::activity() const {
     if (!presence()) return Absent;
-    return _state == STATE_STILL ? Still : Moving;
+    if (_state == STATE_STILL) return Still;
+
+    // Derive it on modules that never report it.
+    //
+    // Three of four modules tested, all firmware v3.3.5, have never sent
+    // 0x02 -- through fresh calibrations, auto-gain, a re-flash and every
+    // threshold setting worth trying. On those, taking the byte at face value
+    // means stillness does not exist: someone sitting quietly reads as moving,
+    // or as nobody once the disappear delay expires.
+    //
+    // _stateSeen records every state byte since boot, so "this module does not
+    // report stillness" is a fact rather than a guess about this frame, and it
+    // is sticky -- one 0x02 hands the decision back to the module for good.
+    // Nothing to configure: a module that can do this uses its own answer.
+    if (!(_stateSeen & (1u << STATE_STILL)) && _engineering && _thresholdsValid) {
+        // Gate 0 is skipped for the same reason the module skips it: its
+        // threshold is never evaluated, so near-field clutter would otherwise
+        // set a flag no configuration could clear.
+        for (uint8_t g = 1; g < 16; g++) {
+            if (dbFromRaw(_energy[g]) > _triggerTh[g]) return Moving;
+        }
+        // Present, and nothing over a movement threshold.
+        return Still;
+    }
+    return Moving;
 }
 
 void LD2402::invalidateThresholdCache() {

@@ -68,6 +68,11 @@ public:
     enum Activity : uint8_t { Absent = 0, Moving = 1, Still = 2 };
 
     // The raw state byte's documented values, used by presence()/activity().
+    //
+    // Not every module produces all three. Measured on four parts, all
+    // firmware v3.3.5: one sends 0x02, three never have. activity() therefore
+    // uses the byte where a module has proved it sends it, and derives
+    // stillness from the gate energies where it has not -- see the note there.
     static constexpr uint8_t STATE_NOBODY = 0x00;
     static constexpr uint8_t STATE_MOVING = 0x01;
     static constexpr uint8_t STATE_STILL  = 0x02;
@@ -283,6 +288,10 @@ private:
     String _lineBuf;
 
     uint8_t _state = 0;   // raw state byte -- see presence() above
+    // Every distinct state byte seen since boot, as a bitmask. Lets activity()
+    // tell "this module never reports stillness" from "it is not still right
+    // now" -- see the note there. Not every module sends 0x02.
+    uint32_t _stateSeen = 0;
 
     // Engineering mode is on unless a sketch explicitly turns it off: it is
     // what still detection needs, and the module drops it whenever it
