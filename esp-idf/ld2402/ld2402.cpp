@@ -681,20 +681,16 @@ static void publishReading() {
             s_pending_activity = LD2402_ABSENT;
             s_pending_since_us = now;
         } else if (arriving) {
-            // An arrival is movement, whatever the first frame classified it
-            // as. You have to move to arrive: a presence event that begins
-            // with someone already motionless is not a thing that happens.
+            // Presence is reported at once, and the label is whatever this
+            // frame actually classified -- not forced to moving.
             //
-            // It happens here because the first frame is published unheld --
-            // presence must not wait -- so a single frame that fails to clear
-            // a movement threshold makes the whole event start as still. Near
-            // the sensor that is not even unlikely: the gates covering the
-            // first metre or so can carry thresholds no person clears.
-            //
-            // Stated rather than held, so presence is still reported at once.
-            // Stillness follows a moment later if they really have settled.
-            s_published_activity = LD2402_MOVING;
-            s_pending_activity = LD2402_MOVING;
+            // It used to be forced, on the theory that you have to move to
+            // arrive. That broke the opposite, real case: someone whose first
+            // frame only clears the still/micro-motion side -- the module's
+            // own 0x02, or the derived still energy -- got published as
+            // moving anyway, on every arrival, on every module.
+            s_published_activity = r.activity;
+            s_pending_activity = r.activity;
             s_pending_since_us = now;
         } else if (r.activity != s_published_activity) {
             if (r.activity != s_pending_activity) {

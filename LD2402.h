@@ -2,6 +2,13 @@
 // Talks over a hardware UART at 115200 8N1 (module ships fixed at that rate).
 // Self-contained: no dependency on any particular project, only Arduino Stream.
 //
+// This is the Arduino/PlatformIO release of the driver (used by examples/ and
+// by anyone pulling this library directly). Presently's own firmware does not
+// link this file -- it uses the ESP-IDF port at esp-idf/ld2402/, which started
+// as a copy of this one but has since had real protocol and classification
+// bugs fixed on hardware (see that file's header comment). A fix proven there
+// is not yet proven here; port it deliberately, don't assume the two agree.
+//
 // Usage:
 //   LD2402 radar;
 //   radar.begin(Serial);       // any Stream: Serial, Serial1, SoftwareSerial...
