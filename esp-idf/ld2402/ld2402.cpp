@@ -369,9 +369,27 @@ static volatile uint16_t s_debounce_ms = 500;
 static ld2402_activity_t s_published_activity = LD2402_ABSENT;
 static ld2402_activity_t s_pending_activity = LD2402_ABSENT;
 static int64_t s_pending_since_us = 0;
+// The tracked distance at the moment a published still began. Compared
+// against the live distance so a real departure can skip the hold above --
+// see the distance-shift bypass in publishReading().
+static int32_t s_still_anchor_cm = -1;
+// How far the tracked distance must move, from where a still began, before
+// it counts as a real departure rather than in-place jitter. See the
+// distance-shift bypass in publishReading() and ld2402_set_departure_cm() in
+// the header.
+static volatile uint16_t s_departure_cm = 35;
 
 void ld2402_set_state_debounce_ms(uint16_t ms) { s_debounce_ms = ms; }
 uint16_t ld2402_get_state_debounce_ms(void) { return s_debounce_ms; }
+void ld2402_set_departure_cm(uint16_t cm) { s_departure_cm = cm; }
+uint16_t ld2402_get_departure_cm(void) { return s_departure_cm; }
+
+// Which of moving_derived/still_derived vs the module's own byte feeds the
+// published activity -- see ld2402_activity_source_t in the header.
+static volatile ld2402_activity_source_t s_activity_source = LD2402_SOURCE_AUTO;
+
+void ld2402_set_activity_source(ld2402_activity_source_t src) { s_activity_source = src; }
+ld2402_activity_source_t ld2402_get_activity_source(void) { return s_activity_source; }
 
 // Same idea for the two module settings the app's Save button always sends
 // together, changed or not. -1 means never read, so the first write always
@@ -519,92 +537,128 @@ static void publishReading() {
         r.motionless_db[i] = s_engineering ? dbFromRaw(s_energy[16 + i]) : NAN;
     }
 
-    // Moving vs still comes straight from the module. See the state-byte
-    // comment above for why this replaced a derived classifier.
+    // Two independent classifications, always both computed, then one
+    // chosen. See ld2402_activity_source_t in the header and the config.h
+    // comment on activity_source for why this is switchable rather than
+    // just picking the one that measured better -- it measured better on
+    // some modules and worse on others, on the same firmware.
     //
     // In ASCII mode there is no state byte at all -- handleTextLine() can only
     // set NOBODY or MOVING -- so a still person reads as moving there. That is
     // a real limit of text mode, not a fallback worth writing code for: the
     // driver keeps the module in engineering mode precisely so this does not
     // happen.
-    r.moving = (s_state == LD2402_STATE_MOVING);
-    r.still  = (s_state == LD2402_STATE_STILL);
+    const bool module_moving = (s_state == LD2402_STATE_MOVING);
+    const bool module_still  = (s_state == LD2402_STATE_STILL);
 
-    // Fall back to deriving stillness on modules that never report it.
+    // Range-correlated, not a blanket scan.
     //
-    // This driver used to derive moving/still from the gate energies, and that
-    // was replaced by reading the state byte after a module was observed
-    // sending 0x02 -- a better answer where it exists, since the module's own
-    // still detector is a long-window breathing filter that no threshold
-    // comparison here can match.
+    // The original derived classifier scanned every gate 1-15 and flagged
+    // moving if *any* of them cleared its own threshold, regardless of where
+    // the person actually is. Measured on hardware: someone standing at
+    // ~3m (gate 4, gates are 0.7m each) was called "moving" by a spike on
+    // gate 6 -- over a metre past them. That is noise or interference in a
+    // gate nobody occupies, counted as equally valid evidence as the gate
+    // the person is actually standing in.
     //
-    // The mistake was generalising from that one module. Measured across four
-    // parts on the same firmware v3.3.5: one emits 0x02, three never do in
-    // ordinary use. On those three, reading the byte alone means stillness
-    // simply does not exist -- a person sitting quietly reads as moving, or as
-    // nobody once the disappear delay expires.
-    //
-    // So: prefer the module's answer, and derive only for modules that have
-    // never given one. s_state_seen makes that distinction cheap and honest --
-    // it is a record of every state byte since boot, so "has never reported
-    // still" is a fact rather than an assumption about the current frame.
-    //
-    // The derivation is the original one: present, and no movement gate over
-    // its threshold. Gate 0 is skipped because near-field clutter there would
-    // otherwise pin `moving` true forever -- which is exactly what a board
-    // with its own PCB in the antenna's near field does.
-    // Presence is left exactly as the module reported it -- only the
-    // moving/still label is derived.
-    //
-    // A version of this derived presence too, from the gate energies, and it
-    // was worse in the way that matters: the energies of someone sitting
-    // quietly hover around their threshold, so presence itself dropped out
-    // frame to frame and the room read as empty with the person still in it.
-    // Losing presence turns a light off; mislabelling moving as still only
-    // changes a word. The module's bit has its disappear delay behind it and
-    // is far steadier, so it decides whether anyone is there, and this decides
-    // only what they are doing.
-    if (!r.still && !(s_state_seen & (1u << LD2402_STATE_STILL))) {
-        // Presence is whatever the module said; only the label is derived.
-        r.moving = false;
-        if (!r.presence) {
-            // Nothing to classify. The gate scan used to run regardless, so a
-            // stray gate over threshold with nobody detected produced
-            // moving=true, presence=false -- a combination that cannot be true
-            // and that no consumer could render.
-        } else if (s_engineering && s_thresholds_valid) {
-            // Mirrors the module's own peak selection: scan gates 1..15 and
-            // take any gate whose energy clears that gate's threshold. Gate 0
-            // is skipped for the same reason the module skips it -- its
-            // threshold is never evaluated, so including it would let
-            // near-field clutter set a flag no configuration could clear.
-            for (uint8_t g = 1; g < 16; g++) {
-                if (!isnan(r.trigger_db[g]) && r.trigger_db[g] > s_trigger_th[g]) {
-                    r.moving = true;
-                    break;
-                }
-            }
-        } else {
-            // No engineering frame or no threshold cache yet: presence is all
-            // there is, so report it as movement rather than inventing a
-            // classification. Guessing "still" here is what once made a
-            // walking person read as stationary.
-            r.moving = true;
+    // A radar range-gates: only the bins near the target's own tracked
+    // distance are evidence about that target. So this only looks at the
+    // gate distance_cm falls in, plus one neighbour either side (a target
+    // straddling a 0.7m bin boundary spills into both) -- never gate 0, for
+    // the same near-field-clutter reason the module's own peak selection
+    // skips it.
+    bool derived_moving;
+    if (!r.presence) {
+        // Nothing to classify. The gate scan used to run regardless, so a
+        // stray gate over threshold with nobody detected produced
+        // moving=true, presence=false -- a combination that cannot be true
+        // and that no consumer could render.
+        derived_moving = false;
+    } else if (s_engineering && s_thresholds_valid) {
+        int g = (int)(s_distanceCm / 70);
+        if (g < 1) g = 1;
+        if (g > 15) g = 15;
+        const int lo = (g > 1) ? g - 1 : 1;
+        const int hi = (g < 15) ? g + 1 : 15;
+        // How far each chain clears its own threshold, at worst across the
+        // 2-3 gates considered. Comparing margins rather than a single
+        // over/under bit lets the two chains be weighed against each other
+        // instead of one silently deciding by going first.
+        float move_margin = -1000.0f, still_margin = -1000.0f;
+        for (int i = lo; i <= hi; i++) {
+            if (!isnan(r.trigger_db[i]))
+                move_margin = fmaxf(move_margin, r.trigger_db[i] - s_trigger_th[i]);
+            if (!isnan(r.motionless_db[i]))
+                still_margin = fmaxf(still_margin, r.motionless_db[i] - s_motionless_th[i]);
         }
-        // Still is the complement of moving, not its own threshold test.
-        //
-        // Testing the motionless energies separately looks more principled and
-        // isn't: the two chains are the same signal under different filters,
-        // so both can clear, neither can, or either alone can -- four
-        // combinations for a two-way question, and two of them have nothing
-        // sensible to display. Something is there, and it is either moving or
-        // it isn't.
-        r.still = r.presence && !r.moving;
+        if (move_margin > 0 && move_margin >= still_margin) {
+            // Movement wins ties -- matches the module's own observed bias,
+            // and errs toward the safer mislabel: a moment called moving
+            // that was actually still just costs a word, where the reverse
+            // can suppress a real light change.
+            derived_moving = true;
+        } else if (still_margin > 0) {
+            derived_moving = false;
+        } else {
+            // Neither chain clears near the target: nothing to call still
+            // from, so report movement rather than inventing a
+            // classification -- same rule as the no-threshold-cache case
+            // below, same reason.
+            derived_moving = true;
+        }
+    } else {
+        // No engineering frame or no threshold cache yet: presence is all
+        // there is, so report it as movement rather than inventing a
+        // classification. Guessing "still" here is what once made a
+        // walking person read as stationary.
+        derived_moving = true;
+    }
+    // Still is the complement of moving, not its own threshold test.
+    //
+    // Testing the motionless energies as a separate yes/no looks more
+    // principled and isn't: the two chains are the same signal under
+    // different filters, so both can clear, neither can, or either alone
+    // can -- four combinations for a two-way question, and two of them have
+    // nothing sensible to display. Something is there, and it is either
+    // moving or it isn't.
+    r.moving_derived = derived_moving;
+    r.still_derived  = r.presence && !derived_moving;
+    r.moving_module  = module_moving;
+    r.still_module   = module_still;
+
+    // Pick which pair actually feeds moving/still/activity below. Both
+    // pairs above are always computed regardless of this choice, so
+    // switching it live never loses data.
+    switch (s_activity_source) {
+    case LD2402_SOURCE_MODULE:
+        r.moving = module_moving;
+        r.still  = module_still;
+        break;
+    case LD2402_SOURCE_DERIVED:
+        r.moving = r.moving_derived;
+        r.still  = r.still_derived;
+        break;
+    default:  // LD2402_SOURCE_AUTO
+        // Trust the module once it has proven it can report still at all
+        // this boot; derive for modules that never have. Measured across
+        // four modules on the same firmware v3.3.5: one emits 0x02, three
+        // never do in ordinary use. On those three, trusting the byte alone
+        // means stillness simply does not exist -- a person sitting
+        // quietly reads as moving, or as nobody once the disappear delay
+        // expires. s_state_seen makes the distinction a fact rather than an
+        // assumption about the current frame.
+        if (s_state_seen & (1u << LD2402_STATE_STILL)) {
+            r.moving = module_moving;
+            r.still  = module_still;
+        } else {
+            r.moving = r.moving_derived;
+            r.still  = r.still_derived;
+        }
+        break;
     }
     // One value carrying the same decision, so callers that want a single
     // answer do not have to recombine the booleans and risk inventing a
     // fourth state that cannot occur.
-    // Recomputed after the derivation above, which can change all three.
     r.activity = !r.presence ? LD2402_ABSENT : (r.moving ? LD2402_MOVING : LD2402_STILL);
 
     // Debounce -- see ld2402_set_state_debounce_ms().
@@ -664,9 +718,8 @@ static void publishReading() {
         // What is left is the part the module cannot do: it reports moving and
         // still from the same signal under two filters, so a person shifting
         // in a chair crosses between them for a frame at a time. This holds
-        // that, in both directions -- holding one way only just moves the
-        // flicker to the other, which showed up as the light going moving,
-        // still, moving on a single walk-in.
+        // that -- except for one case below, where holding would itself be
+        // wrong.
         const uint32_t hold_ms = s_debounce_ms;
         // Going absent is published as-is, at once. This has to be tested
         // before the arrival rule below, and separately from it: both involve
@@ -675,10 +728,35 @@ static void publishReading() {
         // so an empty room reported movement and stayed there for good.
         const bool leaving = r.activity == LD2402_ABSENT;
         const bool arriving = !leaving && s_published_activity == LD2402_ABSENT;
+        // A real departure from a published still, not the in-place flicker
+        // this hold exists to absorb.
+        //
+        // The module's own tracked distance is independent evidence the gate
+        // energies do not carry: a person actually walking away moves it, and
+        // someone shifting weight in the same spot does not. Measured jitter
+        // on a stationary target is roughly 10-15cm frame to frame; the
+        // default 35cm is comfortably above that and comfortably below a
+        // real step, so it separates "the room's noise floor moved" from
+        // "the person did." Adjustable -- see ld2402_set_departure_cm().
+        //
+        // Bypassing the hold here, rather than shortening it everywhere, is
+        // what keeps a real walk-away instant without reopening the flicker
+        // this debounce was built to fix -- the in-place case still waits.
+        const bool real_departure = !leaving && !arriving &&
+            s_published_activity == LD2402_STILL &&
+            r.activity != LD2402_STILL &&
+            s_still_anchor_cm >= 0 &&
+            (int32_t)(s_distanceCm > (uint32_t)s_still_anchor_cm
+                          ? s_distanceCm - (uint32_t)s_still_anchor_cm
+                          : (uint32_t)s_still_anchor_cm - s_distanceCm) > (int32_t)s_departure_cm;
 
         if (leaving) {
             s_published_activity = LD2402_ABSENT;
             s_pending_activity = LD2402_ABSENT;
+            s_pending_since_us = now;
+        } else if (real_departure) {
+            s_published_activity = r.activity;
+            s_pending_activity = r.activity;
             s_pending_since_us = now;
         } else if (arriving) {
             // Presence is reported at once, and the label is whatever this
@@ -703,6 +781,18 @@ static void publishReading() {
             // Back to what is already published: cancel any pending change.
             s_pending_activity = r.activity;
             s_pending_since_us = now;
+        }
+        // Anchor the distance at the moment a still is published, so the next
+        // departure has something real to compare against. Set only on the
+        // transition into still -- updating it every frame while still stays
+        // published would make it track the live distance and the comparison
+        // above could never fire. Cleared the moment still is left, so a
+        // later still starts its own fresh anchor rather than comparing
+        // against a stale one.
+        if (s_published_activity == LD2402_STILL) {
+            if (s_still_anchor_cm < 0) s_still_anchor_cm = s_distanceCm;
+        } else {
+            s_still_anchor_cm = -1;
         }
         r.activity = s_published_activity;
         r.moving   = (r.activity == LD2402_MOVING);
