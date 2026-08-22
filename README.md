@@ -107,6 +107,7 @@ flash — see [below](#after-calibrating-or-auto-gaining-re-read-the-thresholds)
 | `radar.connected()` | `true` if the sensor has sent data in the last 2 seconds |
 | `radar.read()` | all of the above, in one go |
 | `radar.isMoving()` / `radar.isStill()` | the same answer as two booleans, if that reads better in your code |
+| `radar.setForceModuleOnly(true)` | stop deriving stillness — take the module's raw byte at face value |
 
 `activity()` gives you one answer instead of three booleans you have to
 combine yourself:
@@ -118,6 +119,26 @@ switch (radar.activity()) {
     case LD2402::Still:  Serial.println("someone's sitting still"); break;
 }
 ```
+
+### When stillness is derived, and how to turn that off
+
+Not every module reports stillness. Measured across four parts, all firmware
+v3.3.5: one sends `0x02`, three never have. On those three, taking the byte at
+face value means stillness does not exist — someone sitting quietly reads as
+moving, or as nobody once the disappear delay expires.
+
+So `activity()` derives it from gate energies on a module that has never sent
+`0x02`, and uses the byte on one that has. The choice is per module and made
+from evidence: a sticky mask records every state byte since boot, and one
+`0x02` hands the decision back to the module permanently. Deriving also needs
+engineering mode and a threshold cache, so call `setEngineeringMode(true)` and
+`cacheThresholds()` or stillness cannot be derived at all.
+
+`setForceModuleOnly(true)` skips the derivation entirely. Reach for it only
+when the derivation is wrong for a particular room and the module's own sparse
+answer is preferred — it does not select a different classifier, it skips one
+side of the existing one. The ESP-IDF driver exposes the same switch as
+`ld2402_set_force_module_only()`.
 
 Or grab everything at once:
 

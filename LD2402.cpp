@@ -603,7 +603,11 @@ LD2402::Activity LD2402::activity() const {
     // report stillness" is a fact rather than a guess about this frame, and it
     // is sticky -- one 0x02 hands the decision back to the module for good.
     // Nothing to configure: a module that can do this uses its own answer.
-    if (!(_stateSeen & (1u << STATE_STILL)) && _engineering && _thresholdsValid) {
+    //
+    // setForceModuleOnly(true) skips the derivation entirely, for the room
+    // where it is wrong and the module's sparse answer is preferred.
+    if (!_forceModuleOnly &&
+        !(_stateSeen & (1u << STATE_STILL)) && _engineering && _thresholdsValid) {
         // Gate 0 is skipped for the same reason the module skips it: its
         // threshold is never evaluated, so near-field clutter would otherwise
         // set a flag no configuration could clear.

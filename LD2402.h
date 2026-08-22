@@ -85,6 +85,18 @@ public:
     static constexpr uint8_t STATE_STILL  = 0x02;
     Activity activity() const;
 
+    // Off (default): the behaviour described above -- trust the byte on a
+    // module that has proven it sends 0x02, derive from gate energies on one
+    // that has not. On: always take the raw byte at face value, never derive,
+    // even before the module has proven it can report stillness.
+    //
+    // Only worth reaching for when the derivation is wrong for a particular
+    // room and the module's own answer, however sparse, is preferred. It does
+    // not select a different classifier -- it skips one side of the existing
+    // one. Mirrors ld2402_set_force_module_only() in the ESP-IDF driver.
+    void setForceModuleOnly(bool on) { _forceModuleOnly = on; }
+    bool forceModuleOnly() const { return _forceModuleOnly; }
+
     bool presence() const;
     // Kept so existing sketches still compile. Both are now derived from
     // activity(), so they cannot disagree with it or with each other.
@@ -321,6 +333,11 @@ private:
     }
     uint16_t _distanceCm = 0;
     bool _engineering = false;
+    // See setForceModuleOnly(). Read by activity(), which is const, but this
+    // is only ever written from the caller's own thread -- unlike the
+    // ESP-IDF driver, where the equivalent is volatile because the reading
+    // is published from the driver's task.
+    bool _forceModuleOnly = false;
     uint32_t _energy[32] = {0};
     unsigned long _lastUpdateMs = 0;
     uint32_t _byteCount = 0;        // every byte ever fed, diagnostic
