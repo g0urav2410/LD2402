@@ -112,21 +112,6 @@ typedef struct {
     // individually, but they are all decided in one place -- see the note in
     // ld2402.cpp -- so they cannot disagree with this or with each other.
     ld2402_activity_t activity;
-
-    // The gate-energy classification, computed every frame regardless of
-    // which source `moving`/`still` above actually used. Diagnostic only --
-    // nothing acts on these. They exist so the module's own answer and the
-    // driver's derived one can be watched side by side while characterising
-    // a module, without switching the driver's trust between them (which is
-    // exactly the mistake the 2026-08-08 regression made -- see the
-    // publishReading() comment in ld2402.cpp).
-    bool moving_derived;
-    bool still_derived;
-    // The module's own state byte, likewise always populated regardless of
-    // activity_source -- the other half of the same side-by-side.
-    bool moving_module;
-    bool still_module;
-
     bool connected;        // a frame has arrived recently (see radar.cpp)
     uint16_t distance_cm;
     bool engineering;      // true once a binary engineering frame has parsed
@@ -262,11 +247,7 @@ uint32_t ld2402_debug_state_seen_mask(void);
 // a frame at a time -- 31 state changes in 80 seconds, measured, on someone
 // sitting still. Every one is an MQTT publish and a row in a history graph.
 //
-// Not symmetric any more. Holding *entering* still is what causes lag people
-// actually feel, so only leaving a published still is held -- and even that
-// is skipped when the module's own tracked distance has visibly moved, since
-// a real departure is not the flicker this exists to absorb. See
-// publishReading() in ld2402.cpp for the distance-shift bypass.
+// Symmetric: holding one direction only moves the flicker to the other.
 //
 // Deliberately does NOT cover "the room is empty". The module's own disappear
 // delay already decides that, and a second hold here duplicated it, added to
@@ -277,27 +258,12 @@ uint32_t ld2402_debug_state_seen_mask(void);
 void ld2402_set_state_debounce_ms(uint16_t ms);
 uint16_t ld2402_get_state_debounce_ms(void);
 
-// Which answer moving/still reports.
-//
-// Both are always computed every frame regardless of this setting -- see
-// moving_derived/still_derived on ld2402_reading_t -- so switching here never
-// loses data, it only changes which pair feeds `moving`/`still`/`activity`.
-typedef enum {
-    LD2402_SOURCE_AUTO = 0,     // module once proven (see state_seen), else ours
-    LD2402_SOURCE_MODULE = 1,   // always the module's own state byte
-    LD2402_SOURCE_DERIVED = 2,  // always our gate-energy calculation
-} ld2402_activity_source_t;
-void ld2402_set_activity_source(ld2402_activity_source_t src);
-ld2402_activity_source_t ld2402_get_activity_source(void);
-
-// How far the module's own tracked distance must move, from where a
-// published still began, before that counts as a real departure rather than
-// in-place jitter -- see the distance-shift bypass in publishReading(). Only
-// matters when moving/still is coming from the module (source auto or
-// module); the derived calculation already range-gates on distance every
-// frame, so it has no separate exit case to bypass.
-void ld2402_set_departure_cm(uint16_t cm);
-uint16_t ld2402_get_departure_cm(void);
+// Off (default): trust the module once it has proven it can report still,
+// derive for modules that never do -- see the still/moving comment above.
+// On: always trust the module's own raw byte, never derive, even before it
+// has proven it can report still.
+void ld2402_set_force_module_only(bool on);
+bool ld2402_get_force_module_only(void);
 
 
 // Thread-safe snapshot of the current reading. Cheap, never blocks on the
